@@ -92,6 +92,29 @@ trendyol-tts-app --host 0.0.0.0 --port 7860
 
 Do **not** set `REQUIRE_CUDA=1` on Mac.
 
+## Pure MLX port progress
+
+The first pure-MLX artifact is implemented: AudioVAE decoder weight export.
+
+```bash
+cd /Users/fobem/trendyol-tts-mlx
+source .venv/bin/activate
+python scripts/export_audiovae_mlx.py --local-files-only
+python scripts/check_mlx_first_conv_parity.py
+```
+
+Verified result for the first real decoder `CausalConv1d` layer:
+
+```text
+max_abs_error: 2.384185791015625e-07
+mean_abs_error: 8.980957311166549e-09
+```
+
+Generated artifacts, intentionally ignored by git:
+
+- `models/Trendyol-TTS-mlx/audiovae_decoder_mlx.safetensors`
+- `models/Trendyol-TTS-mlx/audiovae_decoder_manifest.json`
+
 ## Notes for a future pure MLX port
 
 A full pure-MLX port should replace modules in this order:
