@@ -94,13 +94,14 @@ Do **not** set `REQUIRE_CUDA=1` on Mac.
 
 ## Pure MLX port progress
 
-The first pure-MLX artifact is implemented: AudioVAE decoder weight export.
+The first pure-MLX artifact is implemented: AudioVAE decoder weight export, plus an MLX implementation of the first two decoder stem convolutions.
 
 ```bash
 cd /Users/fobem/trendyol-tts-mlx
 source .venv/bin/activate
 python scripts/export_audiovae_mlx.py --local-files-only
 python scripts/check_mlx_first_conv_parity.py
+python -m unittest tests.test_mlx_audiovae_decoder -v
 ```
 
 Verified result for the first real decoder `CausalConv1d` layer:
@@ -109,6 +110,8 @@ Verified result for the first real decoder `CausalConv1d` layer:
 max_abs_error: 2.384185791015625e-07
 mean_abs_error: 8.980957311166549e-09
 ```
+
+Verified `AudioVAEDecoderStem` (`decoder.model.0` + `decoder.model.1`) matches upstream PyTorch in the unit test.
 
 Generated artifacts, intentionally ignored by git:
 
