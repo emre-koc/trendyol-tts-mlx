@@ -37,6 +37,15 @@ Check the environment:
 trendyol-tts-check
 ```
 
+Verified on this Mac M1/MPS:
+
+```text
+mlx: ok, default_device=Device(gpu, 0)
+torch mps available: True
+```
+
+First run downloads about 4.8 GB of model files into the Hugging Face cache.
+
 Generate a WAV:
 
 ```bash
