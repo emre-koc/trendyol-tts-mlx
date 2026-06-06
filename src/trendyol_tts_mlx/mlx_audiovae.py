@@ -26,8 +26,8 @@ class Conv1dSpec:
 
     @classmethod
     def from_manifest_entry(cls, entry: dict[str, Any]) -> "Conv1dSpec":
-        if entry["kind"] != "conv1d":
-            raise ValueError(f"expected conv1d entry, got {entry['kind']} for {entry['name']}")
+        if entry["kind"] not in {"conv1d", "conv_transpose1d"}:
+            raise ValueError(f"expected conv entry, got {entry['kind']} for {entry['name']}")
         return cls(
             name=entry["name"],
             in_channels=int(entry["in_channels"]),
@@ -66,7 +66,7 @@ class CausalConv1d:
         if spec.mlx_bias is not None:
             self.conv.bias = tensors[spec.mlx_bias]
 
-    def __call__(self, x_nct: np.ndarray | mx.array) -> np.ndarray:
+    def _call_mx(self, x_nct: np.ndarray | mx.array) -> mx.array:
         x = mx.array(x_nct) if not isinstance(x_nct, mx.array) else x_nct
         # NCT -> NLC
         x = mx.transpose(x, (0, 2, 1))
@@ -75,7 +75,131 @@ class CausalConv1d:
             x = mx.pad(x, [(0, 0), (left_pad, 0), (0, 0)])
         y = self.conv(x)
         # NLC -> NCT
-        return np.array(mx.transpose(y, (0, 2, 1)))
+        return mx.transpose(y, (0, 2, 1))
+
+    def __call__(self, x_nct: np.ndarray | mx.array) -> np.ndarray:
+        return np.array(self._call_mx(x_nct))
+
+
+class CausalTransposeConv1d:
+    """MLX equivalent of VoxCPM AudioVAEV2 CausalTransposeConv1d."""
+
+    def __init__(self, spec: Conv1dSpec, tensors: dict[str, mx.array]):
+        self.spec = spec
+        self.conv = nn.ConvTranspose1d(
+            spec.in_channels,
+            spec.out_channels,
+            spec.kernel_size,
+            stride=spec.stride,
+            padding=0,
+            dilation=spec.dilation,
+            output_padding=0,
+            bias=spec.mlx_bias is not None,
+        )
+        self.conv.weight = tensors[spec.mlx_weight]
+        if spec.mlx_bias is not None:
+            self.conv.bias = tensors[spec.mlx_bias]
+
+    def _call_mx(self, x_nct: np.ndarray | mx.array) -> mx.array:
+        x = mx.array(x_nct) if not isinstance(x_nct, mx.array) else x_nct
+        x = mx.transpose(x, (0, 2, 1))
+        y = self.conv(x)
+        crop = self.spec.causal_padding * 2 - self.spec.output_padding
+        if crop:
+            y = y[:, :-crop, :]
+        return mx.transpose(y, (0, 2, 1))
+
+    def __call__(self, x_nct: np.ndarray | mx.array) -> np.ndarray:
+        return np.array(self._call_mx(x_nct))
+
+
+class Snake1d:
+    def __init__(self, alpha: mx.array):
+        self.alpha = alpha
+
+    def _call_mx(self, x_nct: np.ndarray | mx.array) -> mx.array:
+        x = mx.array(x_nct) if not isinstance(x_nct, mx.array) else x_nct
+        return x + (1.0 / (self.alpha + 1e-9)) * mx.square(mx.sin(self.alpha * x))
+
+    def __call__(self, x_nct: np.ndarray | mx.array) -> np.ndarray:
+        return np.array(self._call_mx(x_nct))
+
+
+class CausalResidualUnit:
+    def __init__(self, snake_0: Snake1d, conv_1: CausalConv1d, snake_2: Snake1d, conv_3: CausalConv1d):
+        self.snake_0 = snake_0
+        self.conv_1 = conv_1
+        self.snake_2 = snake_2
+        self.conv_3 = conv_3
+
+    def _call_mx(self, x_nct: np.ndarray | mx.array) -> mx.array:
+        x = mx.array(x_nct) if not isinstance(x_nct, mx.array) else x_nct
+        y = self.snake_0._call_mx(x)
+        y = self.conv_1._call_mx(y)
+        y = self.snake_2._call_mx(y)
+        y = self.conv_3._call_mx(y)
+        return x + y
+
+    def __call__(self, x_nct: np.ndarray | mx.array) -> np.ndarray:
+        return np.array(self._call_mx(x_nct))
+
+
+class AudioVAEFirstDecoderBlock:
+    """First full decoder upsampling block (`decoder.model.2`) in MLX."""
+
+    def __init__(
+        self,
+        pre_snake: Snake1d,
+        upsample: CausalTransposeConv1d,
+        residual_units: list[CausalResidualUnit],
+    ):
+        if len(residual_units) != 3:
+            raise ValueError("AudioVAEFirstDecoderBlock requires exactly three residual units")
+        self.pre_snake = pre_snake
+        self.upsample = upsample
+        self.residual_units = residual_units
+
+    @classmethod
+    def from_manifest(cls, manifest_path: str | Path) -> "AudioVAEFirstDecoderBlock":
+        manifest_path = Path(manifest_path)
+        manifest = json.loads(manifest_path.read_text())
+        tensors = mx.load(manifest["weights"])
+        conv_entries = {entry["name"]: entry for entry in manifest["conv_layers"]}
+
+        def conv(name: str) -> CausalConv1d:
+            return CausalConv1d(Conv1dSpec.from_manifest_entry(conv_entries[name]), tensors)
+
+        def snake(name: str) -> Snake1d:
+            return Snake1d(tensors[name])
+
+        def residual(prefix: str) -> CausalResidualUnit:
+            return CausalResidualUnit(
+                snake(f"{prefix}.block.0.alpha"),
+                conv(f"{prefix}.block.1"),
+                snake(f"{prefix}.block.2.alpha"),
+                conv(f"{prefix}.block.3"),
+            )
+
+        upsample_spec = Conv1dSpec.from_manifest_entry(conv_entries["decoder.model.2.block.1"])
+        return cls(
+            pre_snake=snake("decoder.model.2.block.0.alpha"),
+            upsample=CausalTransposeConv1d(upsample_spec, tensors),
+            residual_units=[
+                residual("decoder.model.2.block.2"),
+                residual("decoder.model.2.block.3"),
+                residual("decoder.model.2.block.4"),
+            ],
+        )
+
+    def _call_mx(self, x_nct: np.ndarray | mx.array) -> mx.array:
+        x = self.pre_snake._call_mx(x_nct)
+        x = self.upsample._call_mx(x)
+        for unit in self.residual_units:
+            x = unit._call_mx(x)
+        return x
+
+    def __call__(self, x_nct: np.ndarray | mx.array) -> np.ndarray:
+        return np.asarray(np.array(self._call_mx(x_nct)), dtype=np.float32)
 
 
 class AudioVAEDecoderStem:
