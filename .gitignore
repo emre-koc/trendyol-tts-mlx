@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+*.wav
+models/
+.gradio/
+.DS_Store

@@ -1,0 +1,13 @@
+README.md
+pyproject.toml
+src/trendyol_tts_mlx/__init__.py
+src/trendyol_tts_mlx/app.py
+src/trendyol_tts_mlx/backend.py
+src/trendyol_tts_mlx/check.py
+src/trendyol_tts_mlx/cli.py
+src/trendyol_tts_mlx.egg-info/PKG-INFO
+src/trendyol_tts_mlx.egg-info/SOURCES.txt
+src/trendyol_tts_mlx.egg-info/dependency_links.txt
+src/trendyol_tts_mlx.egg-info/entry_points.txt
+src/trendyol_tts_mlx.egg-info/requires.txt
+src/trendyol_tts_mlx.egg-info/top_level.txt

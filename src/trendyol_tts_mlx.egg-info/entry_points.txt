@@ -1,0 +1,4 @@
+[console_scripts]
+trendyol-tts = trendyol_tts_mlx.cli:main
+trendyol-tts-app = trendyol_tts_mlx.app:main
+trendyol-tts-check = trendyol_tts_mlx.check:main

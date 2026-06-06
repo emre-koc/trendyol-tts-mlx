@@ -1,0 +1,24 @@
+[project]
+name = "trendyol-tts-mlx"
+version = "0.1.0"
+description = "Mac Apple Silicon runner for Trendyol/Trendyol-TTS with MLX project scaffolding and VoxCPM MPS backend"
+requires-python = ">=3.10,<3.12"
+dependencies = [
+  "voxcpm==2.0.3",
+  "mlx>=0.29.0",
+  "huggingface-hub>=0.33.0",
+  "soundfile>=0.12.1",
+  "numpy>=1.26",
+  "gradio>=6,<7",
+]
+
+[project.scripts]
+trendyol-tts = "trendyol_tts_mlx.cli:main"
+trendyol-tts-app = "trendyol_tts_mlx.app:main"
+trendyol-tts-check = "trendyol_tts_mlx.check:main"
+
+[tool.uv]
+python-preference = "only-managed"
+
+[tool.ruff]
+line-length = 100

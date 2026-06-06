@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: trendyol-tts-mlx
+Version: 0.1.0
+Summary: Mac Apple Silicon runner for Trendyol/Trendyol-TTS with MLX project scaffolding and VoxCPM MPS backend
+Requires-Python: <3.12,>=3.10
+Requires-Dist: voxcpm==2.0.3
+Requires-Dist: mlx>=0.29.0
+Requires-Dist: huggingface-hub>=0.33.0
+Requires-Dist: soundfile>=0.12.1
+Requires-Dist: numpy>=1.26
+Requires-Dist: gradio<7,>=6
