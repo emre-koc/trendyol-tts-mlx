@@ -117,10 +117,17 @@ Verified MLX AudioVAE decoder milestones:
 - `AudioVAEDecoderBlock` matches individual upsampling blocks such as `decoder.model.2` and `decoder.model.3`.
 - `AudioVAEDecoder` matches the full upstream decoder model sequence (`decoder.model.0` through `decoder.model.10`, including final `Tanh`) for deterministic latent inputs.
 
+The next upstream VoxCPM2 layer slice is also started:
+
+- `scripts/export_voxcpm2_layers_mlx.py` exports non-transformer projection weights from `model.safetensors`.
+- `ScalarQuantizationLayer` (`fsq_layer`) is implemented in MLX and parity-tested against the upstream PyTorch eval path.
+
 Generated artifacts, intentionally ignored by git:
 
 - `models/Trendyol-TTS-mlx/audiovae_decoder_mlx.safetensors`
 - `models/Trendyol-TTS-mlx/audiovae_decoder_manifest.json`
+- `models/Trendyol-TTS-mlx/voxcpm2_layers_mlx.safetensors`
+- `models/Trendyol-TTS-mlx/voxcpm2_layers_manifest.json`
 
 ## Notes for a future pure MLX port
 
