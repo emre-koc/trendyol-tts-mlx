@@ -17,7 +17,7 @@ from huggingface_hub import snapshot_download
 from safetensors import safe_open
 
 
-LINEAR_PREFIXES = [
+BASE_LINEAR_PREFIXES = [
     "fsq_layer.in_proj",
     "fsq_layer.out_proj",
     "enc_to_lm_proj",
@@ -27,20 +27,26 @@ LINEAR_PREFIXES = [
     "stop_proj",
     "stop_head",
     "feat_encoder.in_proj",
-    "feat_encoder.encoder.layers.0.mlp.gate_proj",
-    "feat_encoder.encoder.layers.0.mlp.up_proj",
-    "feat_encoder.encoder.layers.0.mlp.down_proj",
-    "feat_encoder.encoder.layers.0.self_attn.q_proj",
-    "feat_encoder.encoder.layers.0.self_attn.k_proj",
-    "feat_encoder.encoder.layers.0.self_attn.v_proj",
-    "feat_encoder.encoder.layers.0.self_attn.o_proj",
 ]
 
-PARAMETER_KEYS = [
+LAYER_LINEAR_SUFFIXES = [
+    "mlp.gate_proj",
+    "mlp.up_proj",
+    "mlp.down_proj",
+    "self_attn.q_proj",
+    "self_attn.k_proj",
+    "self_attn.v_proj",
+    "self_attn.o_proj",
+]
+
+BASE_PARAMETER_KEYS = [
     "feat_encoder.special_token",
-    "feat_encoder.encoder.layers.0.input_layernorm.weight",
-    "feat_encoder.encoder.layers.0.post_attention_layernorm.weight",
     "feat_encoder.encoder.norm.weight",
+]
+
+LAYER_PARAMETER_SUFFIXES = [
+    "input_layernorm.weight",
+    "post_attention_layernorm.weight",
 ]
 
 
@@ -56,10 +62,21 @@ def export(model_id: str, out_dir: Path, local_files_only: bool = False) -> dict
     tensors: dict[str, mx.array] = {}
     linear_layers: list[dict[str, Any]] = []
     parameters: list[dict[str, Any]] = []
+    encoder_layer_count = int(cfg["encoder_config"]["num_layers"])
+    linear_prefixes = BASE_LINEAR_PREFIXES + [
+        f"feat_encoder.encoder.layers.{layer_idx}.{suffix}"
+        for layer_idx in range(encoder_layer_count)
+        for suffix in LAYER_LINEAR_SUFFIXES
+    ]
+    parameter_keys = BASE_PARAMETER_KEYS + [
+        f"feat_encoder.encoder.layers.{layer_idx}.{suffix}"
+        for layer_idx in range(encoder_layer_count)
+        for suffix in LAYER_PARAMETER_SUFFIXES
+    ]
     weights_path = model_dir / "model.safetensors"
     with safe_open(weights_path, framework="pt", device="cpu") as f:
         keys = set(f.keys())
-        for prefix in LINEAR_PREFIXES:
+        for prefix in linear_prefixes:
             weight_key = f"{prefix}.weight"
             bias_key = f"{prefix}.bias"
             if weight_key not in keys:
@@ -81,7 +98,7 @@ def export(model_id: str, out_dir: Path, local_files_only: bool = False) -> dict
                 entry["mlx_bias_shape"] = list(bias.shape)
             linear_layers.append(entry)
 
-        for key in PARAMETER_KEYS:
+        for key in parameter_keys:
             if key not in keys:
                 raise KeyError(f"missing expected tensor {key}")
             tensor = f.get_tensor(key).float().contiguous()

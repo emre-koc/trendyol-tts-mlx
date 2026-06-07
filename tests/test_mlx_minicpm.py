@@ -16,6 +16,7 @@ from voxcpm.modules.minicpm4.model import (
     MiniCPMDecoderLayer,
     MiniCPMLongRoPE,
     MiniCPMMLP,
+    MiniCPMModel,
     MiniCPMRMSNorm,
     apply_rotary_pos_emb,
 )
@@ -42,6 +43,8 @@ def ensure_exported_layers() -> None:
             any(f"{name}.weight" not in parameter_names for name in RMSNORM_CASES)
             or any(f"{MLP_CASE}.{proj}" not in linear_names for proj in ("gate_proj", "up_proj", "down_proj"))
             or any(f"{ATTENTION_CASE}.{proj}" not in linear_names for proj in ("q_proj", "k_proj", "v_proj", "o_proj"))
+            or "feat_encoder.encoder.layers.11.self_attn.o_proj" not in linear_names
+            or "feat_encoder.encoder.layers.11.post_attention_layernorm.weight" not in parameter_names
             or "encoder_rope_scaling" not in manifest
             or "encoder_rms_norm_eps" not in manifest
         )
@@ -72,6 +75,8 @@ def local_encoder_config() -> SimpleNamespace:
         scale_depth=lm_cfg["scale_depth"],
         num_hidden_layers=enc_cfg["num_layers"],
         use_mup=lm_cfg["use_mup"],
+        vocab_size=0,
+        no_rope=lm_cfg.get("no_rope", False),
     )
 
 
@@ -117,6 +122,17 @@ def load_torch_decoder_layer(layer_idx: int = 0) -> MiniCPMDecoderLayer:
             state[key] = f.get_tensor(f"{prefix}{key}")
     layer.load_state_dict(state)
     return layer
+
+
+def load_torch_encoder_model() -> MiniCPMModel:
+    model_dir = Path(snapshot_download("Trendyol/Trendyol-TTS", local_files_only=True))
+    model = MiniCPMModel(local_encoder_config()).eval()
+    state = {}
+    with safe_open(model_dir / "model.safetensors", framework="pt", device="cpu") as f:
+        for key in model.state_dict().keys():
+            state[key] = f.get_tensor(f"feat_encoder.encoder.{key}")
+    model.load_state_dict(state)
+    return model
 
 
 class TestMLXMiniCPM(unittest.TestCase):
@@ -253,6 +269,25 @@ class TestMLXMiniCPM(unittest.TestCase):
         np.testing.assert_allclose(y_mlx, y_torch.detach().cpu().numpy(), rtol=5e-5, atol=5e-5)
         np.testing.assert_allclose(past_mlx[0], past_torch[0].detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
         np.testing.assert_allclose(past_mlx[1], past_torch[1].detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
+
+    def test_full_encoder_stack_matches_pytorch_uncausal(self) -> None:
+        from trendyol_tts_mlx.mlx_minicpm import MiniCPMEncoder as MLXMiniCPMEncoder
+
+        ensure_exported_layers()
+        rng = np.random.default_rng(2036)
+        hidden = rng.standard_normal((1, 4, 1024), dtype=np.float32)
+
+        torch_model = load_torch_encoder_model()
+        with torch.no_grad():
+            y_torch, cache_torch = torch_model(torch.from_numpy(hidden), is_causal=False)
+
+        mlx_encoder = MLXMiniCPMEncoder.from_manifest(MANIFEST)
+        y_mlx, cache_mlx = mlx_encoder(hidden, is_causal=False)
+
+        self.assertEqual(len(cache_mlx), len(cache_torch))
+        np.testing.assert_allclose(y_mlx, y_torch.detach().cpu().numpy(), rtol=1e-4, atol=1e-4)
+        np.testing.assert_allclose(cache_mlx[-1][0], cache_torch[-1][0].detach().cpu().numpy(), rtol=5e-5, atol=5e-5)
+        np.testing.assert_allclose(cache_mlx[-1][1], cache_torch[-1][1].detach().cpu().numpy(), rtol=5e-5, atol=5e-5)
 
 
 if __name__ == "__main__":

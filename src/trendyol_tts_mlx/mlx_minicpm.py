@@ -361,3 +361,47 @@ class MiniCPMDecoderLayer:
                 np.asarray(np.array(value_states), dtype=np.float32),
             ),
         )
+
+
+class MiniCPMEncoder:
+    """MLX equivalent of the VoxCPM local-encoder MiniCPMModel stack."""
+
+    def __init__(self, layers: list[MiniCPMDecoderLayer], norm: MiniCPMRMSNorm):
+        self.layers = layers
+        self.norm = norm
+
+    @classmethod
+    def from_manifest(cls, manifest_path: str | Path) -> "MiniCPMEncoder":
+        manifest, _ = _load_manifest_and_tensors(manifest_path)
+        num_layers = int(manifest["encoder_num_hidden_layers"])
+        return cls(
+            layers=[MiniCPMDecoderLayer.from_manifest(manifest_path, layer_idx=idx) for idx in range(num_layers)],
+            norm=MiniCPMRMSNorm.from_manifest(manifest_path, "feat_encoder.encoder.norm"),
+        )
+
+    def _call_mx(
+        self, inputs_embeds: np.ndarray | mx.array, is_causal: bool = False
+    ) -> tuple[mx.array, list[tuple[mx.array, mx.array]]]:
+        hidden = mx.array(inputs_embeds) if not isinstance(inputs_embeds, mx.array) else inputs_embeds
+        position_ids = mx.arange(hidden.shape[1], dtype=mx.int64)
+        next_decoder_cache = []
+        for layer in self.layers:
+            hidden, this_cache = layer._call_mx(hidden, position_ids=position_ids, is_causal=is_causal)
+            next_decoder_cache.append(this_cache)
+        hidden = self.norm._call_mx(hidden)
+        return hidden, next_decoder_cache
+
+    def __call__(
+        self, inputs_embeds: np.ndarray | mx.array, is_causal: bool = False
+    ) -> tuple[np.ndarray, list[tuple[np.ndarray, np.ndarray]]]:
+        output, cache = self._call_mx(inputs_embeds, is_causal=is_causal)
+        return (
+            np.asarray(np.array(output), dtype=np.float32),
+            [
+                (
+                    np.asarray(np.array(key_states), dtype=np.float32),
+                    np.asarray(np.array(value_states), dtype=np.float32),
+                )
+                for key_states, value_states in cache
+            ],
+        )

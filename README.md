@@ -130,6 +130,7 @@ The next upstream VoxCPM2 layer slice is also started:
 - `MiniCPMLongRoPE` and `apply_rotary_pos_emb` implement and parity-test the local-encoder LongRoPE cache/rotary application.
 - `MiniCPMAttention` implements and parity-tests the first local-encoder full attention path with RoPE + grouped-query SDPA for `is_causal=False`.
 - `MiniCPMDecoderLayer` implements and parity-tests the first complete local-encoder transformer layer: input RMSNorm + attention residual + post-attention RMSNorm + MLP residual.
+- `MiniCPMEncoder` implements and parity-tests the full 12-layer local-encoder transformer stack plus final norm for `is_causal=False`.
 
 Generated artifacts, intentionally ignored by git:
 
