@@ -27,6 +27,9 @@ LINEAR_PREFIXES = [
     "stop_proj",
     "stop_head",
     "feat_encoder.in_proj",
+    "feat_encoder.encoder.layers.0.mlp.gate_proj",
+    "feat_encoder.encoder.layers.0.mlp.up_proj",
+    "feat_encoder.encoder.layers.0.mlp.down_proj",
 ]
 
 PARAMETER_KEYS = [

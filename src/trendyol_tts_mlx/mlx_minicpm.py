@@ -5,7 +5,7 @@ from pathlib import Path
 import mlx.core as mx
 import numpy as np
 
-from .mlx_voxcpm2_layers import _load_manifest_and_tensors
+from .mlx_voxcpm2_layers import Linear, _load_manifest_and_tensors
 
 
 class MiniCPMRMSNorm:
@@ -36,6 +36,36 @@ class MiniCPMRMSNorm:
         variance = mx.mean(mx.square(x.astype(mx.float32)), axis=-1, keepdims=True)
         y = x * mx.rsqrt(variance + self.eps)
         return y * self.weight
+
+    def __call__(self, hidden: np.ndarray | mx.array) -> np.ndarray:
+        return np.asarray(np.array(self._call_mx(hidden)), dtype=np.float32)
+
+
+class MiniCPMMLP:
+    """MLX equivalent of VoxCPM MiniCPMMLP.
+
+    Upstream formula:
+        down_proj(silu(gate_proj(x)) * up_proj(x))
+    """
+
+    def __init__(self, gate_proj: Linear, up_proj: Linear, down_proj: Linear):
+        self.gate_proj = gate_proj
+        self.up_proj = up_proj
+        self.down_proj = down_proj
+
+    @classmethod
+    def from_manifest(cls, manifest_path: str | Path, name: str) -> "MiniCPMMLP":
+        return cls(
+            gate_proj=Linear.from_manifest(manifest_path, f"{name}.gate_proj"),
+            up_proj=Linear.from_manifest(manifest_path, f"{name}.up_proj"),
+            down_proj=Linear.from_manifest(manifest_path, f"{name}.down_proj"),
+        )
+
+    def _call_mx(self, hidden: np.ndarray | mx.array) -> mx.array:
+        gate = self.gate_proj._call_mx(hidden)
+        gate = gate * mx.sigmoid(gate)
+        up = self.up_proj._call_mx(hidden)
+        return self.down_proj._call_mx(gate * up)
 
     def __call__(self, hidden: np.ndarray | mx.array) -> np.ndarray:
         return np.asarray(np.array(self._call_mx(hidden)), dtype=np.float32)

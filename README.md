@@ -125,6 +125,7 @@ The next upstream VoxCPM2 layer slice is also started:
 - `StopPredictor` implements and parity-tests the stop path: `stop_head(SiLU(stop_proj(lm_hidden)))`.
 - `LocEncInputProjection` implements and parity-tests the first VoxCPMLocEnc slice: `feat_encoder.in_proj`, special-token prepend, and `b t p c -> (b t) p c` reshape.
 - `MiniCPMRMSNorm` implements and parity-tests the first local-encoder MiniCPM normalization slices (`layers.0.input_layernorm`, `layers.0.post_attention_layernorm`, and final `encoder.norm`).
+- `MiniCPMMLP` implements and parity-tests the first local-encoder feed-forward block: `down_proj(SiLU(gate_proj(x)) * up_proj(x))`.
 
 Generated artifacts, intentionally ignored by git:
 
