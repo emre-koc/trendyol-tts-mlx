@@ -123,6 +123,7 @@ The next upstream VoxCPM2 layer slice is also started:
 - `ScalarQuantizationLayer` (`fsq_layer`) is implemented in MLX and parity-tested against the upstream PyTorch eval path.
 - `Linear.from_manifest(...)` loads the standalone projection layers (`enc_to_lm_proj`, `lm_to_dit_proj`, `res_to_dit_proj`, `fusion_concat_proj`) and parity-tests them against upstream PyTorch `nn.Linear`.
 - `StopPredictor` implements and parity-tests the stop path: `stop_head(SiLU(stop_proj(lm_hidden)))`.
+- `LocEncInputProjection` implements and parity-tests the first VoxCPMLocEnc slice: `feat_encoder.in_proj`, special-token prepend, and `b t p c -> (b t) p c` reshape.
 
 Generated artifacts, intentionally ignored by git:
 

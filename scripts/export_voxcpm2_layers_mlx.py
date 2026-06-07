@@ -26,6 +26,11 @@ LINEAR_PREFIXES = [
     "fusion_concat_proj",
     "stop_proj",
     "stop_head",
+    "feat_encoder.in_proj",
+]
+
+PARAMETER_KEYS = [
+    "feat_encoder.special_token",
 ]
 
 
@@ -40,12 +45,14 @@ def export(model_id: str, out_dir: Path, local_files_only: bool = False) -> dict
 
     tensors: dict[str, mx.array] = {}
     linear_layers: list[dict[str, Any]] = []
+    parameters: list[dict[str, Any]] = []
     weights_path = model_dir / "model.safetensors"
     with safe_open(weights_path, framework="pt", device="cpu") as f:
+        keys = set(f.keys())
         for prefix in LINEAR_PREFIXES:
             weight_key = f"{prefix}.weight"
             bias_key = f"{prefix}.bias"
-            if weight_key not in f.keys():
+            if weight_key not in keys:
                 raise KeyError(f"missing expected tensor {weight_key}")
             weight = f.get_tensor(weight_key).float().contiguous()
             tensors[weight_key] = mx.array(weight.numpy())
@@ -57,12 +64,26 @@ def export(model_id: str, out_dir: Path, local_files_only: bool = False) -> dict
                 "mlx_weight": weight_key,
                 "mlx_weight_shape": list(weight.shape),
             }
-            if bias_key in f.keys():
+            if bias_key in keys:
                 bias = f.get_tensor(bias_key).float().contiguous()
                 tensors[bias_key] = mx.array(bias.numpy())
                 entry["mlx_bias"] = bias_key
                 entry["mlx_bias_shape"] = list(bias.shape)
             linear_layers.append(entry)
+
+        for key in PARAMETER_KEYS:
+            if key not in keys:
+                raise KeyError(f"missing expected tensor {key}")
+            tensor = f.get_tensor(key).float().contiguous()
+            tensors[key] = mx.array(tensor.numpy())
+            parameters.append(
+                {
+                    "name": key,
+                    "kind": "parameter",
+                    "mlx_tensor": key,
+                    "mlx_tensor_shape": list(tensor.shape),
+                }
+            )
 
     mlx_weights_path = out_dir / "voxcpm2_layers_mlx.safetensors"
     mx.save_safetensors(str(mlx_weights_path), tensors)
@@ -78,6 +99,7 @@ def export(model_id: str, out_dir: Path, local_files_only: bool = False) -> dict
         "scalar_quantization_scale": cfg["scalar_quantization_scale"],
         "num_exported_tensors": len(tensors),
         "linear_layers": linear_layers,
+        "parameters": parameters,
         "notes": [
             "Linear weights keep PyTorch layout [out_features, in_features]; MLX applies x @ weight.T + bias.",
             "ScalarQuantizationLayer eval path is tanh -> round(hidden * scale) / scale -> out_proj.",
