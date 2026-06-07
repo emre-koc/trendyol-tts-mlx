@@ -293,3 +293,71 @@ class MiniCPMAttention:
                 np.asarray(np.array(value_states), dtype=np.float32),
             ),
         )
+
+
+class MiniCPMDecoderLayer:
+    """MLX equivalent of one VoxCPM local-encoder MiniCPMDecoderLayer."""
+
+    def __init__(
+        self,
+        input_layernorm: MiniCPMRMSNorm,
+        self_attn: MiniCPMAttention,
+        post_attention_layernorm: MiniCPMRMSNorm,
+        mlp: MiniCPMMLP,
+        scale_depth: float,
+        num_hidden_layers: int,
+        use_mup: bool,
+    ):
+        self.input_layernorm = input_layernorm
+        self.self_attn = self_attn
+        self.post_attention_layernorm = post_attention_layernorm
+        self.mlp = mlp
+        self.scale_depth = float(scale_depth)
+        self.num_hidden_layers = int(num_hidden_layers)
+        self.use_mup = bool(use_mup)
+
+    @classmethod
+    def from_manifest(cls, manifest_path: str | Path, layer_idx: int = 0) -> "MiniCPMDecoderLayer":
+        manifest, _ = _load_manifest_and_tensors(manifest_path)
+        prefix = f"feat_encoder.encoder.layers.{layer_idx}"
+        return cls(
+            input_layernorm=MiniCPMRMSNorm.from_manifest(manifest_path, f"{prefix}.input_layernorm"),
+            self_attn=MiniCPMAttention.from_manifest(manifest_path, f"{prefix}.self_attn"),
+            post_attention_layernorm=MiniCPMRMSNorm.from_manifest(manifest_path, f"{prefix}.post_attention_layernorm"),
+            mlp=MiniCPMMLP.from_manifest(manifest_path, f"{prefix}.mlp"),
+            scale_depth=manifest.get("encoder_scale_depth", 1.0),
+            num_hidden_layers=manifest.get("encoder_num_hidden_layers", 1),
+            use_mup=manifest.get("encoder_use_mup", False),
+        )
+
+    def _residual_add_mx(self, residual: mx.array, hidden: mx.array) -> mx.array:
+        if self.use_mup:
+            hidden = hidden * (self.scale_depth / math.sqrt(self.num_hidden_layers))
+        return residual + hidden
+
+    def _call_mx(
+        self, hidden_states: np.ndarray | mx.array, position_ids: np.ndarray | mx.array, is_causal: bool = False
+    ) -> tuple[mx.array, tuple[mx.array, mx.array]]:
+        hidden = mx.array(hidden_states) if not isinstance(hidden_states, mx.array) else hidden_states
+        residual = hidden
+        hidden = self.input_layernorm._call_mx(hidden)
+        hidden, present_key_value = self.self_attn._call_mx(hidden, position_ids=position_ids, is_causal=is_causal)
+        hidden = self._residual_add_mx(residual, hidden)
+
+        residual = hidden
+        hidden = self.post_attention_layernorm._call_mx(hidden)
+        hidden = self.mlp._call_mx(hidden)
+        hidden = self._residual_add_mx(residual, hidden)
+        return hidden, present_key_value
+
+    def __call__(
+        self, hidden_states: np.ndarray | mx.array, position_ids: np.ndarray | mx.array, is_causal: bool = False
+    ) -> tuple[np.ndarray, tuple[np.ndarray, np.ndarray]]:
+        output, (key_states, value_states) = self._call_mx(hidden_states, position_ids, is_causal=is_causal)
+        return (
+            np.asarray(np.array(output), dtype=np.float32),
+            (
+                np.asarray(np.array(key_states), dtype=np.float32),
+                np.asarray(np.array(value_states), dtype=np.float32),
+            ),
+        )

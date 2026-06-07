@@ -13,6 +13,7 @@ from huggingface_hub import snapshot_download
 from safetensors import safe_open
 from voxcpm.modules.minicpm4.model import (
     MiniCPMAttention,
+    MiniCPMDecoderLayer,
     MiniCPMLongRoPE,
     MiniCPMMLP,
     MiniCPMRMSNorm,
@@ -42,6 +43,7 @@ def ensure_exported_layers() -> None:
             or any(f"{MLP_CASE}.{proj}" not in linear_names for proj in ("gate_proj", "up_proj", "down_proj"))
             or any(f"{ATTENTION_CASE}.{proj}" not in linear_names for proj in ("q_proj", "k_proj", "v_proj", "o_proj"))
             or "encoder_rope_scaling" not in manifest
+            or "encoder_rms_norm_eps" not in manifest
         )
     if not needs_export:
         return
@@ -66,6 +68,10 @@ def local_encoder_config() -> SimpleNamespace:
         kv_channels=enc_cfg["kv_channels"],
         rope_theta=lm_cfg["rope_theta"],
         rope_scaling=SimpleNamespace(**lm_cfg["rope_scaling"]),
+        rms_norm_eps=lm_cfg["rms_norm_eps"],
+        scale_depth=lm_cfg["scale_depth"],
+        num_hidden_layers=enc_cfg["num_layers"],
+        use_mup=lm_cfg["use_mup"],
     )
 
 
@@ -99,6 +105,18 @@ def load_torch_attention(name: str) -> MiniCPMAttention:
             state[key] = f.get_tensor(f"{name}.{key}")
     attention.load_state_dict(state)
     return attention
+
+
+def load_torch_decoder_layer(layer_idx: int = 0) -> MiniCPMDecoderLayer:
+    model_dir = Path(snapshot_download("Trendyol/Trendyol-TTS", local_files_only=True))
+    layer = MiniCPMDecoderLayer(local_encoder_config(), layer_idx=layer_idx).eval()
+    prefix = f"feat_encoder.encoder.layers.{layer_idx}."
+    state = {}
+    with safe_open(model_dir / "model.safetensors", framework="pt", device="cpu") as f:
+        for key in layer.state_dict().keys():
+            state[key] = f.get_tensor(f"{prefix}{key}")
+    layer.load_state_dict(state)
+    return layer
 
 
 class TestMLXMiniCPM(unittest.TestCase):
@@ -214,6 +232,27 @@ class TestMLXMiniCPM(unittest.TestCase):
         np.testing.assert_allclose(sin_mlx, sin_torch.detach().cpu().numpy(), rtol=1e-6, atol=1e-6)
         np.testing.assert_allclose(q_mlx, q_torch.detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
         np.testing.assert_allclose(k_mlx, k_torch.detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
+
+    def test_first_decoder_layer_matches_pytorch_uncausal(self) -> None:
+        from trendyol_tts_mlx.mlx_minicpm import MiniCPMDecoderLayer as MLXMiniCPMDecoderLayer
+
+        ensure_exported_layers()
+        rng = np.random.default_rng(2035)
+        hidden = rng.standard_normal((2, 5, 1024), dtype=np.float32)
+        position_ids = np.arange(5, dtype=np.int64)
+
+        torch_layer = load_torch_decoder_layer(layer_idx=0)
+        torch_rope = MiniCPMLongRoPE(local_encoder_config())
+        with torch.no_grad():
+            position_emb = torch_rope(torch.from_numpy(position_ids))
+            y_torch, past_torch = torch_layer(torch.from_numpy(hidden), position_emb, is_causal=False)
+
+        mlx_layer = MLXMiniCPMDecoderLayer.from_manifest(MANIFEST, layer_idx=0)
+        y_mlx, past_mlx = mlx_layer(hidden, position_ids=position_ids, is_causal=False)
+
+        np.testing.assert_allclose(y_mlx, y_torch.detach().cpu().numpy(), rtol=5e-5, atol=5e-5)
+        np.testing.assert_allclose(past_mlx[0], past_torch[0].detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(past_mlx[1], past_torch[1].detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":
