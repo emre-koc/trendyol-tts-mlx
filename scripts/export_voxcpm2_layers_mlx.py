@@ -30,6 +30,10 @@ LINEAR_PREFIXES = [
     "feat_encoder.encoder.layers.0.mlp.gate_proj",
     "feat_encoder.encoder.layers.0.mlp.up_proj",
     "feat_encoder.encoder.layers.0.mlp.down_proj",
+    "feat_encoder.encoder.layers.0.self_attn.q_proj",
+    "feat_encoder.encoder.layers.0.self_attn.k_proj",
+    "feat_encoder.encoder.layers.0.self_attn.v_proj",
+    "feat_encoder.encoder.layers.0.self_attn.o_proj",
 ]
 
 PARAMETER_KEYS = [
@@ -101,6 +105,9 @@ def export(model_id: str, out_dir: Path, local_files_only: bool = False) -> dict
         "lm_hidden_size": cfg["lm_config"]["hidden_size"],
         "dit_hidden_size": cfg["dit_config"]["hidden_dim"],
         "encoder_hidden_size": cfg["encoder_config"]["hidden_dim"],
+        "encoder_num_attention_heads": cfg["encoder_config"]["num_heads"],
+        "encoder_num_key_value_heads": cfg["lm_config"]["num_key_value_heads"],
+        "encoder_kv_channels": cfg["encoder_config"]["kv_channels"],
         "scalar_quantization_latent_dim": cfg["scalar_quantization_latent_dim"],
         "scalar_quantization_scale": cfg["scalar_quantization_scale"],
         "num_exported_tensors": len(tensors),

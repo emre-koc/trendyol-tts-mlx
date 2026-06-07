@@ -126,6 +126,7 @@ The next upstream VoxCPM2 layer slice is also started:
 - `LocEncInputProjection` implements and parity-tests the first VoxCPMLocEnc slice: `feat_encoder.in_proj`, special-token prepend, and `b t p c -> (b t) p c` reshape.
 - `MiniCPMRMSNorm` implements and parity-tests the first local-encoder MiniCPM normalization slices (`layers.0.input_layernorm`, `layers.0.post_attention_layernorm`, and final `encoder.norm`).
 - `MiniCPMMLP` implements and parity-tests the first local-encoder feed-forward block: `down_proj(SiLU(gate_proj(x)) * up_proj(x))`.
+- `MiniCPMAttentionProjections` implements and parity-tests the first local-encoder attention projection/reshape slice (`q_proj`, `k_proj`, `v_proj`, `o_proj`) before RoPE/SDPA.
 
 Generated artifacts, intentionally ignored by git:
 
