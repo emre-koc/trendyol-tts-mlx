@@ -127,6 +127,7 @@ The next upstream VoxCPM2 layer slice is also started:
 - `MiniCPMRMSNorm` implements and parity-tests the first local-encoder MiniCPM normalization slices (`layers.0.input_layernorm`, `layers.0.post_attention_layernorm`, and final `encoder.norm`).
 - `MiniCPMMLP` implements and parity-tests the first local-encoder feed-forward block: `down_proj(SiLU(gate_proj(x)) * up_proj(x))`.
 - `MiniCPMAttentionProjections` implements and parity-tests the first local-encoder attention projection/reshape slice (`q_proj`, `k_proj`, `v_proj`, `o_proj`) before RoPE/SDPA.
+- `MiniCPMLongRoPE` and `apply_rotary_pos_emb` implement and parity-test the local-encoder RoPE cache/lookup and q/k rotation path before SDPA.
 
 Generated artifacts, intentionally ignored by git:
 

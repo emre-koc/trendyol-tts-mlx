@@ -11,7 +11,13 @@ import numpy as np
 import torch
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
-from voxcpm.modules.minicpm4.model import MiniCPMAttention, MiniCPMMLP, MiniCPMRMSNorm
+from voxcpm.modules.minicpm4.model import (
+    MiniCPMAttention,
+    MiniCPMLongRoPE,
+    MiniCPMMLP,
+    MiniCPMRMSNorm,
+    apply_rotary_pos_emb,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +41,7 @@ def ensure_exported_layers() -> None:
             any(f"{name}.weight" not in parameter_names for name in RMSNORM_CASES)
             or any(f"{MLP_CASE}.{proj}" not in linear_names for proj in ("gate_proj", "up_proj", "down_proj"))
             or any(f"{ATTENTION_CASE}.{proj}" not in linear_names for proj in ("q_proj", "k_proj", "v_proj", "o_proj"))
+            or "encoder_rope_scaling" not in manifest
         )
     if not needs_export:
         return
@@ -57,6 +64,8 @@ def local_encoder_config() -> SimpleNamespace:
         num_key_value_heads=lm_cfg["num_key_value_heads"],
         max_position_embeddings=lm_cfg["max_position_embeddings"],
         kv_channels=enc_cfg["kv_channels"],
+        rope_theta=lm_cfg["rope_theta"],
+        rope_scaling=SimpleNamespace(**lm_cfg["rope_scaling"]),
     )
 
 
@@ -160,6 +169,30 @@ class TestMLXMiniCPM(unittest.TestCase):
         np.testing.assert_allclose(k_mlx, k_torch.detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
         np.testing.assert_allclose(v_mlx, v_torch.detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
         np.testing.assert_allclose(o_mlx, o_torch.detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
+
+    def test_first_attention_rope_application_matches_pytorch(self) -> None:
+        from trendyol_tts_mlx.mlx_minicpm import MiniCPMLongRoPE as MLXMiniCPMLongRoPE
+        from trendyol_tts_mlx.mlx_minicpm import apply_rotary_pos_emb as mlx_apply_rotary_pos_emb
+
+        ensure_exported_layers()
+        rng = np.random.default_rng(2033)
+        q = rng.standard_normal((2, 16, 5, 128), dtype=np.float32)
+        k = rng.standard_normal((2, 2, 5, 128), dtype=np.float32)
+        position_ids = np.arange(5, dtype=np.int64)
+
+        torch_rope = MiniCPMLongRoPE(local_encoder_config())
+        with torch.no_grad():
+            cos_torch, sin_torch = torch_rope(torch.from_numpy(position_ids))
+            q_torch, k_torch = apply_rotary_pos_emb(torch.from_numpy(q), torch.from_numpy(k), cos_torch, sin_torch)
+
+        mlx_rope = MLXMiniCPMLongRoPE.from_manifest(MANIFEST)
+        cos_mlx, sin_mlx = mlx_rope(position_ids)
+        q_mlx, k_mlx = mlx_apply_rotary_pos_emb(q, k, cos_mlx, sin_mlx)
+
+        np.testing.assert_allclose(cos_mlx, cos_torch.detach().cpu().numpy(), rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(sin_mlx, sin_torch.detach().cpu().numpy(), rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(q_mlx, q_torch.detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(k_mlx, k_torch.detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":
