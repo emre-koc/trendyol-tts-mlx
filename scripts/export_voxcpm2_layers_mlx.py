@@ -31,6 +31,9 @@ LINEAR_PREFIXES = [
 
 PARAMETER_KEYS = [
     "feat_encoder.special_token",
+    "feat_encoder.encoder.layers.0.input_layernorm.weight",
+    "feat_encoder.encoder.layers.0.post_attention_layernorm.weight",
+    "feat_encoder.encoder.norm.weight",
 ]
 
 
