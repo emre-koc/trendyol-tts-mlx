@@ -144,8 +144,13 @@ class CausalResidualUnit:
         return np.array(self._call_mx(x_nct))
 
 
-class AudioVAEFirstDecoderBlock:
-    """First full decoder upsampling block (`decoder.model.2`) in MLX."""
+class AudioVAEDecoderBlock:
+    """MLX implementation of an AudioVAE decoder upsampling block.
+
+    Covers VoxCPM decoder blocks such as `decoder.model.2` and
+    `decoder.model.3`: Snake activation, causal transpose convolution upsample,
+    and three causal residual units.
+    """
 
     def __init__(
         self,
@@ -154,17 +159,20 @@ class AudioVAEFirstDecoderBlock:
         residual_units: list[CausalResidualUnit],
     ):
         if len(residual_units) != 3:
-            raise ValueError("AudioVAEFirstDecoderBlock requires exactly three residual units")
+            raise ValueError("AudioVAEDecoderBlock requires exactly three residual units")
         self.pre_snake = pre_snake
         self.upsample = upsample
         self.residual_units = residual_units
 
     @classmethod
-    def from_manifest(cls, manifest_path: str | Path) -> "AudioVAEFirstDecoderBlock":
+    def from_manifest(cls, manifest_path: str | Path, model_index: int) -> "AudioVAEDecoderBlock":
+        if model_index < 2 or model_index > 7:
+            raise ValueError(f"expected decoder model index 2..7, got {model_index}")
         manifest_path = Path(manifest_path)
         manifest = json.loads(manifest_path.read_text())
         tensors = mx.load(manifest["weights"])
         conv_entries = {entry["name"]: entry for entry in manifest["conv_layers"]}
+        prefix = f"decoder.model.{model_index}"
 
         def conv(name: str) -> CausalConv1d:
             return CausalConv1d(Conv1dSpec.from_manifest_entry(conv_entries[name]), tensors)
@@ -172,23 +180,20 @@ class AudioVAEFirstDecoderBlock:
         def snake(name: str) -> Snake1d:
             return Snake1d(tensors[name])
 
-        def residual(prefix: str) -> CausalResidualUnit:
+        def residual(residual_index: int) -> CausalResidualUnit:
+            residual_prefix = f"{prefix}.block.{residual_index}"
             return CausalResidualUnit(
-                snake(f"{prefix}.block.0.alpha"),
-                conv(f"{prefix}.block.1"),
-                snake(f"{prefix}.block.2.alpha"),
-                conv(f"{prefix}.block.3"),
+                snake(f"{residual_prefix}.block.0.alpha"),
+                conv(f"{residual_prefix}.block.1"),
+                snake(f"{residual_prefix}.block.2.alpha"),
+                conv(f"{residual_prefix}.block.3"),
             )
 
-        upsample_spec = Conv1dSpec.from_manifest_entry(conv_entries["decoder.model.2.block.1"])
+        upsample_spec = Conv1dSpec.from_manifest_entry(conv_entries[f"{prefix}.block.1"])
         return cls(
-            pre_snake=snake("decoder.model.2.block.0.alpha"),
+            pre_snake=snake(f"{prefix}.block.0.alpha"),
             upsample=CausalTransposeConv1d(upsample_spec, tensors),
-            residual_units=[
-                residual("decoder.model.2.block.2"),
-                residual("decoder.model.2.block.3"),
-                residual("decoder.model.2.block.4"),
-            ],
+            residual_units=[residual(2), residual(3), residual(4)],
         )
 
     def _call_mx(self, x_nct: np.ndarray | mx.array) -> mx.array:
@@ -200,6 +205,14 @@ class AudioVAEFirstDecoderBlock:
 
     def __call__(self, x_nct: np.ndarray | mx.array) -> np.ndarray:
         return np.asarray(np.array(self._call_mx(x_nct)), dtype=np.float32)
+
+
+class AudioVAEFirstDecoderBlock(AudioVAEDecoderBlock):
+    """Backward-compatible wrapper for the first upsampling block (`decoder.model.2`)."""
+
+    @classmethod
+    def from_manifest(cls, manifest_path: str | Path) -> "AudioVAEFirstDecoderBlock":
+        return super().from_manifest(manifest_path, model_index=2)
 
 
 class AudioVAEDecoderStem:
@@ -227,8 +240,58 @@ class AudioVAEDecoderStem:
         ]
         return cls([CausalConv1d(spec, tensors) for spec in specs])
 
-    def __call__(self, z_nct: np.ndarray | mx.array) -> np.ndarray:
+    def _call_mx(self, z_nct: np.ndarray | mx.array) -> mx.array:
         x: np.ndarray | mx.array = z_nct
         for layer in self.layers:
-            x = layer(x)
-        return np.asarray(x, dtype=np.float32)
+            x = layer._call_mx(x)
+        return x if isinstance(x, mx.array) else mx.array(x)
+
+    def __call__(self, z_nct: np.ndarray | mx.array) -> np.ndarray:
+        return np.asarray(np.array(self._call_mx(z_nct)), dtype=np.float32)
+
+
+class AudioVAEDecoder:
+    """Pure-MLX AudioVAE decoder graph: latent `NCT` -> waveform `NCT`.
+
+    This implements the full upstream `vae.decoder` sequence for exported
+    Trendyol/VoxCPM2 AudioVAE decoder weights.
+    """
+
+    def __init__(
+        self,
+        stem: AudioVAEDecoderStem,
+        blocks: list[AudioVAEDecoderBlock],
+        final_snake: Snake1d,
+        final_conv: CausalConv1d,
+    ):
+        if len(blocks) != 6:
+            raise ValueError("AudioVAEDecoder requires decoder blocks 2..7")
+        self.stem = stem
+        self.blocks = blocks
+        self.final_snake = final_snake
+        self.final_conv = final_conv
+
+    @classmethod
+    def from_manifest(cls, manifest_path: str | Path) -> "AudioVAEDecoder":
+        manifest_path = Path(manifest_path)
+        manifest = json.loads(manifest_path.read_text())
+        tensors = mx.load(manifest["weights"])
+        conv_entries = {entry["name"]: entry for entry in manifest["conv_layers"]}
+        final_spec = Conv1dSpec.from_manifest_entry(conv_entries["decoder.model.9"])
+        return cls(
+            stem=AudioVAEDecoderStem.from_manifest(manifest_path),
+            blocks=[AudioVAEDecoderBlock.from_manifest(manifest_path, model_index=i) for i in range(2, 8)],
+            final_snake=Snake1d(tensors["decoder.model.8.alpha"]),
+            final_conv=CausalConv1d(final_spec, tensors),
+        )
+
+    def _call_mx(self, z_nct: np.ndarray | mx.array) -> mx.array:
+        x = self.stem._call_mx(z_nct)
+        for block in self.blocks:
+            x = block._call_mx(x)
+        x = self.final_snake._call_mx(x)
+        x = self.final_conv._call_mx(x)
+        return mx.tanh(x)
+
+    def __call__(self, z_nct: np.ndarray | mx.array) -> np.ndarray:
+        return np.asarray(np.array(self._call_mx(z_nct)), dtype=np.float32)
