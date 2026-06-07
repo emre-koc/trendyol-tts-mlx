@@ -9,6 +9,16 @@ import mlx.core as mx
 import numpy as np
 
 
+def _load_manifest_and_tensors(manifest_path: str | Path) -> tuple[dict[str, Any], dict[str, mx.array]]:
+    manifest_path = Path(manifest_path)
+    manifest = json.loads(manifest_path.read_text())
+    return manifest, mx.load(manifest["weights"])
+
+
+def _linear_entries_by_name(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {entry["name"]: entry for entry in manifest["linear_layers"]}
+
+
 @dataclass(frozen=True)
 class LinearSpec:
     name: str
@@ -38,6 +48,14 @@ class Linear:
         self.weight = tensors[spec.mlx_weight]
         self.bias = tensors[spec.mlx_bias] if spec.mlx_bias is not None else None
 
+    @classmethod
+    def from_manifest(cls, manifest_path: str | Path, name: str) -> "Linear":
+        manifest, tensors = _load_manifest_and_tensors(manifest_path)
+        entries = _linear_entries_by_name(manifest)
+        if name not in entries:
+            raise KeyError(f"linear layer {name!r} not found in manifest")
+        return cls(LinearSpec.from_manifest_entry(entries[name]), tensors)
+
     def _call_mx(self, x: np.ndarray | mx.array) -> mx.array:
         y = mx.matmul(mx.array(x) if not isinstance(x, mx.array) else x, mx.transpose(self.weight))
         if self.bias is not None:
@@ -58,10 +76,8 @@ class ScalarQuantizationLayer:
 
     @classmethod
     def from_manifest(cls, manifest_path: str | Path) -> "ScalarQuantizationLayer":
-        manifest_path = Path(manifest_path)
-        manifest = json.loads(manifest_path.read_text())
-        tensors = mx.load(manifest["weights"])
-        linear_entries = {entry["name"]: entry for entry in manifest["linear_layers"]}
+        manifest, tensors = _load_manifest_and_tensors(manifest_path)
+        linear_entries = _linear_entries_by_name(manifest)
         return cls(
             in_proj=Linear(LinearSpec.from_manifest_entry(linear_entries["fsq_layer.in_proj"]), tensors),
             out_proj=Linear(LinearSpec.from_manifest_entry(linear_entries["fsq_layer.out_proj"]), tensors),
@@ -76,3 +92,28 @@ class ScalarQuantizationLayer:
 
     def __call__(self, hidden: np.ndarray | mx.array) -> np.ndarray:
         return np.asarray(np.array(self._call_mx(hidden)), dtype=np.float32)
+
+
+class StopPredictor:
+    """MLX equivalent of `stop_head(SiLU(stop_proj(lm_hidden)))`."""
+
+    def __init__(self, stop_proj: Linear, stop_head: Linear):
+        self.stop_proj = stop_proj
+        self.stop_head = stop_head
+
+    @classmethod
+    def from_manifest(cls, manifest_path: str | Path) -> "StopPredictor":
+        manifest, tensors = _load_manifest_and_tensors(manifest_path)
+        linear_entries = _linear_entries_by_name(manifest)
+        return cls(
+            stop_proj=Linear(LinearSpec.from_manifest_entry(linear_entries["stop_proj"]), tensors),
+            stop_head=Linear(LinearSpec.from_manifest_entry(linear_entries["stop_head"]), tensors),
+        )
+
+    def _call_mx(self, lm_hidden: np.ndarray | mx.array) -> mx.array:
+        x = self.stop_proj._call_mx(lm_hidden)
+        x = x * mx.sigmoid(x)
+        return self.stop_head._call_mx(x)
+
+    def __call__(self, lm_hidden: np.ndarray | mx.array) -> np.ndarray:
+        return np.asarray(np.array(self._call_mx(lm_hidden)), dtype=np.float32)
