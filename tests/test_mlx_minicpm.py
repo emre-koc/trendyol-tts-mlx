@@ -170,6 +170,27 @@ class TestMLXMiniCPM(unittest.TestCase):
         np.testing.assert_allclose(v_mlx, v_torch.detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
         np.testing.assert_allclose(o_mlx, o_torch.detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
 
+    def test_first_attention_forward_matches_pytorch_uncausal(self) -> None:
+        from trendyol_tts_mlx.mlx_minicpm import MiniCPMAttention as MLXMiniCPMAttention
+
+        ensure_exported_layers()
+        rng = np.random.default_rng(2034)
+        hidden = rng.standard_normal((2, 5, 1024), dtype=np.float32)
+        position_ids = np.arange(5, dtype=np.int64)
+
+        torch_attention = load_torch_attention(ATTENTION_CASE)
+        torch_rope = MiniCPMLongRoPE(local_encoder_config())
+        with torch.no_grad():
+            position_emb = torch_rope(torch.from_numpy(position_ids))
+            y_torch, past_torch = torch_attention(torch.from_numpy(hidden), position_emb, is_causal=False)
+
+        mlx_attention = MLXMiniCPMAttention.from_manifest(MANIFEST, ATTENTION_CASE)
+        y_mlx, past_mlx = mlx_attention(hidden, position_ids=position_ids, is_causal=False)
+
+        np.testing.assert_allclose(y_mlx, y_torch.detach().cpu().numpy(), rtol=2e-5, atol=2e-5)
+        np.testing.assert_allclose(past_mlx[0], past_torch[0].detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(past_mlx[1], past_torch[1].detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
+
     def test_first_attention_rope_application_matches_pytorch(self) -> None:
         from trendyol_tts_mlx.mlx_minicpm import MiniCPMLongRoPE as MLXMiniCPMLongRoPE
         from trendyol_tts_mlx.mlx_minicpm import apply_rotary_pos_emb as mlx_apply_rotary_pos_emb

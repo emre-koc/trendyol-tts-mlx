@@ -230,3 +230,66 @@ class MiniCPMAttentionProjections:
 
     def output_projection(self, attn_output: np.ndarray | mx.array) -> np.ndarray:
         return np.asarray(np.array(self._output_projection_mx(attn_output)), dtype=np.float32)
+
+
+class MiniCPMAttention:
+    """MLX forward slice of VoxCPM MiniCPMAttention for full-sequence inference."""
+
+    def __init__(self, projections: MiniCPMAttentionProjections, rope: MiniCPMLongRoPE):
+        self.projections = projections
+        self.rope = rope
+        self.num_heads = projections.num_heads
+        self.num_key_value_heads = projections.num_key_value_heads
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        self.head_dim = projections.head_dim
+
+    @classmethod
+    def from_manifest(cls, manifest_path: str | Path, name: str) -> "MiniCPMAttention":
+        return cls(
+            projections=MiniCPMAttentionProjections.from_manifest(manifest_path, name),
+            rope=MiniCPMLongRoPE.from_manifest(manifest_path),
+        )
+
+    def _scaled_dot_product_attention_mx(
+        self, query: mx.array, key: mx.array, value: mx.array, is_causal: bool = False
+    ) -> mx.array:
+        if self.num_key_value_groups != 1:
+            key = mx.repeat(key, self.num_key_value_groups, axis=1)
+            value = mx.repeat(value, self.num_key_value_groups, axis=1)
+
+        scale = 1.0 / math.sqrt(self.head_dim)
+        scores = mx.matmul(query.astype(mx.float32), mx.transpose(key.astype(mx.float32), (0, 1, 3, 2))) * scale
+        if is_causal:
+            q_len, k_len = scores.shape[-2], scores.shape[-1]
+            mask = mx.triu(mx.ones((q_len, k_len), dtype=mx.bool_), k=1)
+            scores = mx.where(mask[None, None, :, :], mx.array(-float("inf"), dtype=mx.float32), scores)
+        probs = mx.softmax(scores, axis=-1)
+        return mx.matmul(probs, value.astype(mx.float32))
+
+    def _call_mx(
+        self, hidden_states: np.ndarray | mx.array, position_ids: np.ndarray | mx.array, is_causal: bool = False
+    ) -> tuple[mx.array, tuple[mx.array, mx.array]]:
+        hidden = mx.array(hidden_states) if not isinstance(hidden_states, mx.array) else hidden_states
+        bsz, q_len = hidden.shape[0], hidden.shape[1]
+        query_states, key_states, value_states = self.projections._project_qkv_mx(hidden)
+        cos, sin = self.rope._call_mx(position_ids)
+        query_states, key_states = _apply_rotary_pos_emb_mx(query_states, key_states, cos, sin)
+        past_key_value = (key_states, value_states)
+
+        attn_output = self._scaled_dot_product_attention_mx(query_states, key_states, value_states, is_causal=is_causal)
+        attn_output = mx.transpose(attn_output, (0, 2, 1, 3))
+        attn_output = mx.reshape(attn_output, (bsz, q_len, self.num_heads * self.head_dim))
+        attn_output = self.projections._output_projection_mx(attn_output)
+        return attn_output, past_key_value
+
+    def __call__(
+        self, hidden_states: np.ndarray | mx.array, position_ids: np.ndarray | mx.array, is_causal: bool = False
+    ) -> tuple[np.ndarray, tuple[np.ndarray, np.ndarray]]:
+        output, (key_states, value_states) = self._call_mx(hidden_states, position_ids, is_causal=is_causal)
+        return (
+            np.asarray(np.array(output), dtype=np.float32),
+            (
+                np.asarray(np.array(key_states), dtype=np.float32),
+                np.asarray(np.array(value_states), dtype=np.float32),
+            ),
+        )
