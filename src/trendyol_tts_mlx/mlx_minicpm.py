@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Callable
+import contextlib
 import math
 
 import mlx.core as mx
@@ -29,7 +31,14 @@ class MiniCPMRMSNorm:
         key = f"{name}.weight"
         if key not in parameter_entries:
             raise KeyError(f"RMSNorm parameter {key!r} not found in manifest")
-        eps = float(manifest.get("encoder_rms_norm_eps", 1e-6))
+        if name.startswith("base_lm."):
+            eps = float(manifest.get("lm_rms_norm_eps", manifest.get("encoder_rms_norm_eps", 1e-6)))
+        elif name.startswith("residual_lm."):
+            eps = float(manifest.get("residual_lm_rms_norm_eps", manifest.get("lm_rms_norm_eps", 1e-6)))
+        elif name.startswith("feat_decoder.estimator.decoder."):
+            eps = float(manifest.get("dit_rms_norm_eps", manifest.get("lm_rms_norm_eps", 1e-6)))
+        else:
+            eps = float(manifest.get("encoder_rms_norm_eps", 1e-6))
         return cls(tensors[parameter_entries[key]["mlx_tensor"]], eps=eps)
 
     def _call_mx(self, hidden: np.ndarray | mx.array) -> mx.array:
@@ -110,6 +119,13 @@ def apply_rotary_pos_emb(
     return np.asarray(np.array(q_embed), dtype=np.float32), np.asarray(np.array(k_embed), dtype=np.float32)
 
 
+def _position_id_to_int(position_id: int | np.integer | np.ndarray | mx.array) -> int:
+    """Convert a scalar position id without forcing MLX/NumPy roundtrip for Python ints."""
+    if isinstance(position_id, (int, np.integer)):
+        return int(position_id)
+    return int(np.asarray(np.array(position_id)).reshape(-1)[0])
+
+
 class MiniCPMLongRoPE:
     """MLX equivalent of upstream MiniCPMLongRoPE cache and lookup."""
 
@@ -133,8 +149,22 @@ class MiniCPMLongRoPE:
         self.cos_cached, self.sin_cached = self._set_cos_sin_cache(self.max_position_embeddings)
 
     @classmethod
-    def from_manifest(cls, manifest_path: str | Path) -> "MiniCPMLongRoPE":
+    def from_manifest(cls, manifest_path: str | Path, scope: str = "encoder") -> "MiniCPMLongRoPE":
         manifest, _ = _load_manifest_and_tensors(manifest_path)
+        if scope in {"lm", "dit"}:
+            prefix = "dit" if scope == "dit" else "lm"
+            rope_scaling = manifest[f"{prefix}_rope_scaling"]
+            hidden_size = manifest[f"{prefix}_hidden_size"]
+            num_heads = manifest[f"{prefix}_num_attention_heads"]
+            kv_channels = manifest.get(f"{prefix}_kv_channels")
+            return cls(
+                dim=kv_channels or hidden_size // num_heads,
+                base=manifest[f"{prefix}_rope_theta"],
+                max_position_embeddings=manifest[f"{prefix}_max_position_embeddings"],
+                short_factor=rope_scaling["short_factor"],
+                long_factor=rope_scaling["long_factor"],
+                original_max_position_embeddings=rope_scaling["original_max_position_embeddings"],
+            )
         rope_scaling = manifest["encoder_rope_scaling"]
         return cls(
             dim=manifest.get("encoder_kv_channels")
@@ -192,17 +222,36 @@ class MiniCPMAttentionProjections:
     @classmethod
     def from_manifest(cls, manifest_path: str | Path, name: str) -> "MiniCPMAttentionProjections":
         manifest, _ = _load_manifest_and_tensors(manifest_path)
-        head_dim = int(
-            manifest.get("encoder_kv_channels")
-            or manifest["encoder_hidden_size"] // manifest["encoder_num_attention_heads"]
-        )
+        if name.startswith("feat_decoder.estimator.decoder."):
+            hidden_size = manifest["dit_hidden_size"]
+            num_heads = manifest["dit_num_attention_heads"]
+            num_key_value_heads = manifest["dit_num_key_value_heads"]
+            head_dim = int(manifest.get("dit_kv_channels") or hidden_size // num_heads)
+        elif name.startswith("base_lm.") or name.startswith("residual_lm."):
+            if name.startswith("residual_lm."):
+                hidden_size = manifest["residual_lm_hidden_size"]
+                num_heads = manifest["residual_lm_num_attention_heads"]
+                num_key_value_heads = manifest["residual_lm_num_key_value_heads"]
+                head_dim = int(manifest.get("residual_lm_kv_channels") or hidden_size // num_heads)
+            else:
+                hidden_size = manifest["lm_hidden_size"]
+                num_heads = manifest["lm_num_attention_heads"]
+                num_key_value_heads = manifest["lm_num_key_value_heads"]
+                head_dim = int(manifest.get("lm_kv_channels") or hidden_size // num_heads)
+        else:
+            num_heads = manifest["encoder_num_attention_heads"]
+            num_key_value_heads = manifest["encoder_num_key_value_heads"]
+            head_dim = int(
+                manifest.get("encoder_kv_channels")
+                or manifest["encoder_hidden_size"] // manifest["encoder_num_attention_heads"]
+            )
         return cls(
             q_proj=Linear.from_manifest(manifest_path, f"{name}.q_proj"),
             k_proj=Linear.from_manifest(manifest_path, f"{name}.k_proj"),
             v_proj=Linear.from_manifest(manifest_path, f"{name}.v_proj"),
             o_proj=Linear.from_manifest(manifest_path, f"{name}.o_proj"),
-            num_heads=manifest["encoder_num_attention_heads"],
-            num_key_value_heads=manifest["encoder_num_key_value_heads"],
+            num_heads=num_heads,
+            num_key_value_heads=num_key_value_heads,
             head_dim=head_dim,
         )
 
@@ -235,7 +284,7 @@ class MiniCPMAttentionProjections:
 class MiniCPMAttention:
     """MLX forward slice of VoxCPM MiniCPMAttention for full-sequence inference."""
 
-    def __init__(self, projections: MiniCPMAttentionProjections, rope: MiniCPMLongRoPE):
+    def __init__(self, projections: MiniCPMAttentionProjections, rope: MiniCPMLongRoPE | None):
         self.projections = projections
         self.rope = rope
         self.num_heads = projections.num_heads
@@ -245,9 +294,18 @@ class MiniCPMAttention:
 
     @classmethod
     def from_manifest(cls, manifest_path: str | Path, name: str) -> "MiniCPMAttention":
+        manifest, _ = _load_manifest_and_tensors(manifest_path)
+        if name.startswith("residual_lm.") and manifest.get("residual_lm_no_rope", False):
+            rope = None
+        else:
+            if name.startswith("feat_decoder.estimator.decoder."):
+                scope = "dit"
+            else:
+                scope = "lm" if name.startswith("base_lm.") or name.startswith("residual_lm.") else "encoder"
+            rope = MiniCPMLongRoPE.from_manifest(manifest_path, scope=scope)
         return cls(
             projections=MiniCPMAttentionProjections.from_manifest(manifest_path, name),
-            rope=MiniCPMLongRoPE.from_manifest(manifest_path),
+            rope=rope,
         )
 
     def _scaled_dot_product_attention_mx(
@@ -266,14 +324,52 @@ class MiniCPMAttention:
         probs = mx.softmax(scores, axis=-1)
         return mx.matmul(probs, value.astype(mx.float32))
 
+    def _forward_step_mx(
+        self,
+        hidden_states: np.ndarray | mx.array,
+        position_id: int | np.ndarray | mx.array,
+        kv_cache: tuple[mx.array, mx.array],
+    ) -> tuple[mx.array, tuple[mx.array, mx.array]]:
+        hidden = mx.array(hidden_states) if not isinstance(hidden_states, mx.array) else hidden_states
+        if hidden.ndim != 2:
+            raise ValueError(f"forward_step expects [batch, hidden], got shape {hidden.shape}")
+        bsz = hidden.shape[0]
+        pos = _position_id_to_int(position_id)
+
+        query_states = self.projections.q_proj._call_mx(hidden)
+        key_states = self.projections.k_proj._call_mx(hidden)
+        value_states = self.projections.v_proj._call_mx(hidden)
+        query_states = mx.transpose(mx.reshape(query_states, (bsz, 1, self.num_heads, self.head_dim)), (0, 2, 1, 3))
+        key_states = mx.transpose(mx.reshape(key_states, (bsz, 1, self.num_key_value_heads, self.head_dim)), (0, 2, 1, 3))
+        value_states = mx.transpose(mx.reshape(value_states, (bsz, 1, self.num_key_value_heads, self.head_dim)), (0, 2, 1, 3))
+
+        if self.rope is not None:
+            cos, sin = self.rope._call_mx(mx.array([pos], dtype=mx.int64))
+            query_states, key_states = _apply_rotary_pos_emb_mx(query_states, key_states, cos, sin)
+
+        key_cache, value_cache = kv_cache
+        key_cache = mx.concatenate([key_cache[:, :, :pos, :], key_states, key_cache[:, :, pos + 1 :, :]], axis=2)
+        value_cache = mx.concatenate(
+            [value_cache[:, :, :pos, :], value_states, value_cache[:, :, pos + 1 :, :]], axis=2
+        )
+        key_context = key_cache[:, :, : pos + 1, :]
+        value_context = value_cache[:, :, : pos + 1, :]
+
+        attn_output = self._scaled_dot_product_attention_mx(query_states, key_context, value_context, is_causal=False)
+        attn_output = mx.transpose(attn_output, (0, 2, 1, 3))
+        attn_output = mx.reshape(attn_output, (bsz, self.num_heads * self.head_dim))
+        attn_output = self.projections._output_projection_mx(attn_output)
+        return attn_output, (key_cache, value_cache)
+
     def _call_mx(
         self, hidden_states: np.ndarray | mx.array, position_ids: np.ndarray | mx.array, is_causal: bool = False
     ) -> tuple[mx.array, tuple[mx.array, mx.array]]:
         hidden = mx.array(hidden_states) if not isinstance(hidden_states, mx.array) else hidden_states
         bsz, q_len = hidden.shape[0], hidden.shape[1]
         query_states, key_states, value_states = self.projections._project_qkv_mx(hidden)
-        cos, sin = self.rope._call_mx(position_ids)
-        query_states, key_states = _apply_rotary_pos_emb_mx(query_states, key_states, cos, sin)
+        if self.rope is not None:
+            cos, sin = self.rope._call_mx(position_ids)
+            query_states, key_states = _apply_rotary_pos_emb_mx(query_states, key_states, cos, sin)
         past_key_value = (key_states, value_states)
 
         attn_output = self._scaled_dot_product_attention_mx(query_states, key_states, value_states, is_causal=is_causal)
@@ -315,10 +411,65 @@ class MiniCPMDecoderLayer:
         self.scale_depth = float(scale_depth)
         self.num_hidden_layers = int(num_hidden_layers)
         self.use_mup = bool(use_mup)
+        self._profile_context: Callable[[str, int | None], Any] | None = None
+        self._profile_prefix: str | None = None
+        self._profile_iteration: int | None = None
+
+    def set_profile_context(
+        self,
+        profile_context: Callable[[str, int | None], Any] | None,
+        *,
+        prefix: str,
+        iteration: int | None = None,
+    ) -> None:
+        self._profile_context = profile_context
+        self._profile_prefix = prefix
+        self._profile_iteration = iteration
+
+    def _profile(self, suffix: str):
+        if self._profile_context is None or self._profile_prefix is None:
+            return contextlib.nullcontext()
+        return self._profile_context(f"{self._profile_prefix}.{suffix}", self._profile_iteration)
+
+    def _profile_eval(self, *arrays: mx.array) -> None:
+        if self._profile_context is not None and arrays:
+            mx.eval(*arrays)
 
     @classmethod
-    def from_manifest(cls, manifest_path: str | Path, layer_idx: int = 0) -> "MiniCPMDecoderLayer":
+    def from_manifest(
+        cls, manifest_path: str | Path, scope: str = "encoder", layer_idx: int = 0
+    ) -> "MiniCPMDecoderLayer":
         manifest, _ = _load_manifest_and_tensors(manifest_path)
+        if scope == "dit":
+            prefix = f"feat_decoder.estimator.decoder.layers.{layer_idx}"
+            return cls(
+                input_layernorm=MiniCPMRMSNorm.from_manifest(manifest_path, f"{prefix}.input_layernorm"),
+                self_attn=MiniCPMAttention.from_manifest(manifest_path, f"{prefix}.self_attn"),
+                post_attention_layernorm=MiniCPMRMSNorm.from_manifest(manifest_path, f"{prefix}.post_attention_layernorm"),
+                mlp=MiniCPMMLP.from_manifest(manifest_path, f"{prefix}.mlp"),
+                scale_depth=manifest.get("dit_scale_depth", 1.0),
+                num_hidden_layers=manifest.get("dit_num_hidden_layers", 1),
+                use_mup=manifest.get("dit_use_mup", False),
+            )
+        if scope == "base_lm" or scope == "residual_lm":
+            prefix = f"{scope}.layers.{layer_idx}"
+            if scope == "residual_lm":
+                scale_depth = manifest.get("residual_lm_scale_depth", manifest.get("lm_scale_depth", 1.0))
+                num_hidden_layers = manifest.get("residual_lm_num_hidden_layers", manifest.get("residual_lm_exported_layer_count", 1))
+                use_mup = manifest.get("residual_lm_use_mup", manifest.get("lm_use_mup", False))
+            else:
+                scale_depth = manifest.get("lm_scale_depth", 1.0)
+                num_hidden_layers = manifest.get("lm_num_hidden_layers", manifest.get("lm_exported_layer_count", 1))
+                use_mup = manifest.get("lm_use_mup", False)
+            return cls(
+                input_layernorm=MiniCPMRMSNorm.from_manifest(manifest_path, f"{prefix}.input_layernorm"),
+                self_attn=MiniCPMAttention.from_manifest(manifest_path, f"{prefix}.self_attn"),
+                post_attention_layernorm=MiniCPMRMSNorm.from_manifest(manifest_path, f"{prefix}.post_attention_layernorm"),
+                mlp=MiniCPMMLP.from_manifest(manifest_path, f"{prefix}.mlp"),
+                scale_depth=scale_depth,
+                num_hidden_layers=num_hidden_layers,
+                use_mup=use_mup,
+            )
         prefix = f"feat_encoder.encoder.layers.{layer_idx}"
         return cls(
             input_layernorm=MiniCPMRMSNorm.from_manifest(manifest_path, f"{prefix}.input_layernorm"),
@@ -335,18 +486,51 @@ class MiniCPMDecoderLayer:
             hidden = hidden * (self.scale_depth / math.sqrt(self.num_hidden_layers))
         return residual + hidden
 
-    def _call_mx(
-        self, hidden_states: np.ndarray | mx.array, position_ids: np.ndarray | mx.array, is_causal: bool = False
+    def _forward_step_mx(
+        self,
+        hidden_states: np.ndarray | mx.array,
+        position_id: int | np.ndarray | mx.array,
+        kv_cache: tuple[mx.array, mx.array],
     ) -> tuple[mx.array, tuple[mx.array, mx.array]]:
         hidden = mx.array(hidden_states) if not isinstance(hidden_states, mx.array) else hidden_states
         residual = hidden
         hidden = self.input_layernorm._call_mx(hidden)
-        hidden, present_key_value = self.self_attn._call_mx(hidden, position_ids=position_ids, is_causal=is_causal)
+        hidden, updated_cache = self.self_attn._forward_step_mx(hidden, position_id=position_id, kv_cache=kv_cache)
         hidden = self._residual_add_mx(residual, hidden)
 
         residual = hidden
         hidden = self.post_attention_layernorm._call_mx(hidden)
         hidden = self.mlp._call_mx(hidden)
+        hidden = self._residual_add_mx(residual, hidden)
+        return hidden, updated_cache
+
+    def _call_mx(
+        self, hidden_states: np.ndarray | mx.array, position_ids: np.ndarray | mx.array, is_causal: bool = False
+    ) -> tuple[mx.array, tuple[mx.array, mx.array]]:
+        hidden = mx.array(hidden_states) if not isinstance(hidden_states, mx.array) else hidden_states
+        if self._profile_context is None:
+            residual = hidden
+            hidden = self.input_layernorm._call_mx(hidden)
+            hidden, present_key_value = self.self_attn._call_mx(hidden, position_ids=position_ids, is_causal=is_causal)
+            hidden = self._residual_add_mx(residual, hidden)
+
+            residual = hidden
+            hidden = self.post_attention_layernorm._call_mx(hidden)
+            hidden = self.mlp._call_mx(hidden)
+            hidden = self._residual_add_mx(residual, hidden)
+            return hidden, present_key_value
+        residual = hidden
+        hidden = self.input_layernorm._call_mx(hidden)
+        with self._profile("attention"):
+            hidden, present_key_value = self.self_attn._call_mx(hidden, position_ids=position_ids, is_causal=is_causal)
+            self._profile_eval(hidden)
+        hidden = self._residual_add_mx(residual, hidden)
+
+        residual = hidden
+        hidden = self.post_attention_layernorm._call_mx(hidden)
+        with self._profile("mlp"):
+            hidden = self.mlp._call_mx(hidden)
+            self._profile_eval(hidden)
         hidden = self._residual_add_mx(residual, hidden)
         return hidden, present_key_value
 

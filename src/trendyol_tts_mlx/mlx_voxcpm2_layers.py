@@ -2,17 +2,23 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import mlx.core as mx
 import numpy as np
 
 
+@lru_cache(maxsize=8)
+def _load_manifest_and_tensors_cached(manifest_path: str) -> tuple[dict[str, Any], dict[str, mx.array]]:
+    path = Path(manifest_path)
+    manifest = json.loads(path.read_text())
+    return manifest, cast(dict[str, mx.array], mx.load(manifest["weights"]))
+
+
 def _load_manifest_and_tensors(manifest_path: str | Path) -> tuple[dict[str, Any], dict[str, mx.array]]:
-    manifest_path = Path(manifest_path)
-    manifest = json.loads(manifest_path.read_text())
-    return manifest, mx.load(manifest["weights"])
+    return _load_manifest_and_tensors_cached(str(Path(manifest_path)))
 
 
 def _linear_entries_by_name(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:

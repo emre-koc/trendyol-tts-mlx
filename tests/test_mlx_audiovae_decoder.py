@@ -109,6 +109,23 @@ class TestMLXAudioVAEDecoder(unittest.TestCase):
         self.assertEqual(y_torch.shape, y_mlx.shape)
         np.testing.assert_allclose(y_mlx, y_torch, rtol=1e-4, atol=5e-5)
 
+    def test_decode_matches_upstream_audio_vae_decode_with_sample_rate_conditioning(self) -> None:
+        ensure_exported_decoder()
+        from trendyol_tts_mlx.mlx_audiovae import AudioVAEDecoder
+
+        rng = np.random.default_rng(654)
+        z_nct = rng.standard_normal((1, 64, 2), dtype=np.float32)
+
+        torch_vae = load_torch_vae()
+        with torch.no_grad():
+            y_torch = torch_vae.decode(torch.from_numpy(z_nct)).detach().cpu().numpy()
+
+        decoder = AudioVAEDecoder.from_manifest(MANIFEST)
+        y_mlx = decoder.decode(z_nct)
+
+        self.assertEqual(y_torch.shape, y_mlx.shape)
+        np.testing.assert_allclose(y_mlx, y_torch, rtol=1e-4, atol=5e-5)
+
 
 if __name__ == "__main__":
     unittest.main()

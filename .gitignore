@@ -2,6 +2,16 @@
 __pycache__/
 *.pyc
 *.wav
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.mlx
 models/
+weights/
+checkpoints/
+.huggingface_token
+.env
 .gradio/
 .DS_Store

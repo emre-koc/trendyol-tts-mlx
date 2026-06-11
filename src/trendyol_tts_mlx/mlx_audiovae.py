@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -207,6 +207,36 @@ class AudioVAEDecoderBlock:
         return np.asarray(np.array(self._call_mx(x_nct)), dtype=np.float32)
 
 
+class SampleRateConditionLayer:
+    """MLX equivalent of AudioVAEV2's scale/bias sample-rate conditioning.
+
+    Upstream `AudioVAE.decode()` applies `sr_cond_model[i]` before each
+    decoder block when `sr_bin_boundaries` is configured. Omitting these layers
+    keeps shapes correct but makes generated audio massively over-amplified.
+    """
+
+    def __init__(self, scale_embed: mx.array, bias_embed: mx.array):
+        self.scale_embed = scale_embed
+        self.bias_embed = bias_embed
+
+    @classmethod
+    def from_tensors(cls, tensors: dict[str, mx.array], index: int) -> "SampleRateConditionLayer":
+        prefix = f"decoder.sr_cond_model.{index}"
+        return cls(
+            scale_embed=tensors[f"{prefix}.scale_embed.weight"],
+            bias_embed=tensors[f"{prefix}.bias_embed.weight"],
+        )
+
+    def _call_mx(self, x_nct: np.ndarray | mx.array, sr_bucket: int) -> mx.array:
+        x = mx.array(x_nct) if not isinstance(x_nct, mx.array) else x_nct
+        scale = self.scale_embed[int(sr_bucket)][None, :, None]
+        bias = self.bias_embed[int(sr_bucket)][None, :, None]
+        return x * scale + bias
+
+    def __call__(self, x_nct: np.ndarray | mx.array, sr_bucket: int) -> np.ndarray:
+        return np.asarray(np.array(self._call_mx(x_nct, sr_bucket)), dtype=np.float32)
+
+
 class AudioVAEFirstDecoderBlock(AudioVAEDecoderBlock):
     """Backward-compatible wrapper for the first upsampling block (`decoder.model.2`)."""
 
@@ -263,6 +293,9 @@ class AudioVAEDecoder:
         blocks: list[AudioVAEDecoderBlock],
         final_snake: Snake1d,
         final_conv: CausalConv1d,
+        sr_bin_boundaries: list[int] | None = None,
+        sr_cond_layers: dict[int, SampleRateConditionLayer] | None = None,
+        out_sample_rate: int = 48000,
     ):
         if len(blocks) != 6:
             raise ValueError("AudioVAEDecoder requires decoder blocks 2..7")
@@ -270,20 +303,44 @@ class AudioVAEDecoder:
         self.blocks = blocks
         self.final_snake = final_snake
         self.final_conv = final_conv
+        self.sr_bin_boundaries = sr_bin_boundaries
+        self.sr_cond_layers = sr_cond_layers or {}
+        self.out_sample_rate = int(out_sample_rate)
 
     @classmethod
     def from_manifest(cls, manifest_path: str | Path) -> "AudioVAEDecoder":
         manifest_path = Path(manifest_path)
         manifest = json.loads(manifest_path.read_text())
-        tensors = mx.load(manifest["weights"])
+        tensors = cast(dict[str, mx.array], mx.load(manifest["weights"]))
         conv_entries = {entry["name"]: entry for entry in manifest["conv_layers"]}
         final_spec = Conv1dSpec.from_manifest_entry(conv_entries["decoder.model.9"])
+        sr_boundaries = manifest.get("sr_bin_boundaries")
+        if sr_boundaries is None and "decoder.sr_bin_boundaries" in tensors:
+            sr_boundaries = np.asarray(np.array(tensors["decoder.sr_bin_boundaries"]), dtype=np.int32).tolist()
+        sr_cond_layers = {
+            idx: SampleRateConditionLayer.from_tensors(tensors, idx)
+            for idx in range(2, 8)
+            if f"decoder.sr_cond_model.{idx}.scale_embed.weight" in tensors
+        }
         return cls(
             stem=AudioVAEDecoderStem.from_manifest(manifest_path),
             blocks=[AudioVAEDecoderBlock.from_manifest(manifest_path, model_index=i) for i in range(2, 8)],
             final_snake=Snake1d(tensors["decoder.model.8.alpha"]),
             final_conv=CausalConv1d(final_spec, tensors),
+            sr_bin_boundaries=sr_boundaries,
+            sr_cond_layers=sr_cond_layers,
+            out_sample_rate=int(manifest.get("out_sample_rate", 48000)),
         )
+
+    def _sr_bucket(self, sample_rate: int | None = None) -> int:
+        if not self.sr_bin_boundaries:
+            return 0
+        sr = int(self.out_sample_rate if sample_rate is None else sample_rate)
+        bucket = 0
+        for boundary in self.sr_bin_boundaries:
+            if sr > int(boundary):
+                bucket += 1
+        return bucket
 
     def _call_mx(self, z_nct: np.ndarray | mx.array) -> mx.array:
         x = self.stem._call_mx(z_nct)
@@ -292,6 +349,22 @@ class AudioVAEDecoder:
         x = self.final_snake._call_mx(x)
         x = self.final_conv._call_mx(x)
         return mx.tanh(x)
+
+    def _decode_mx(self, z_nct: np.ndarray | mx.array, sample_rate: int | None = None) -> mx.array:
+        """Match upstream `AudioVAE.decode()`, including sample-rate conditioning."""
+        x = self.stem._call_mx(z_nct)
+        sr_bucket = self._sr_bucket(sample_rate)
+        for model_index, block in zip(range(2, 8), self.blocks):
+            cond = self.sr_cond_layers.get(model_index)
+            if cond is not None:
+                x = cond._call_mx(x, sr_bucket)
+            x = block._call_mx(x)
+        x = self.final_snake._call_mx(x)
+        x = self.final_conv._call_mx(x)
+        return mx.tanh(x)
+
+    def decode(self, z_nct: np.ndarray | mx.array, sample_rate: int | None = None) -> np.ndarray:
+        return np.asarray(np.array(self._decode_mx(z_nct, sample_rate)), dtype=np.float32)
 
     def __call__(self, z_nct: np.ndarray | mx.array) -> np.ndarray:
         return np.asarray(np.array(self._call_mx(z_nct)), dtype=np.float32)

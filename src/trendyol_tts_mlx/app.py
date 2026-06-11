@@ -15,6 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=7860)
     p.add_argument("--device", default=None, choices=["mps", "cpu", "auto"])
+    p.add_argument("--backend", default=None, choices=["mlx", "mps", "torch"])
     p.add_argument("--model-id", default=None)
     p.add_argument("--cfg", type=float, default=None)
     p.add_argument("--steps", type=int, default=None)
@@ -27,6 +28,7 @@ def main() -> int:
     cfg = config_from_env(
         model_id=args.model_id,
         device=args.device,
+        backend=args.backend,
         cfg_value=args.cfg,
         inference_timesteps=args.steps,
         max_len=args.max_len,
@@ -39,6 +41,7 @@ def main() -> int:
         effective = config_from_env(
             model_id=cfg.model_id,
             device=cfg.device,
+            backend=cfg.backend,
             optimize=cfg.optimize,
             seed=cfg.seed,
             cfg_value=float(cfg_value),
@@ -65,7 +68,7 @@ def main() -> int:
         ],
         outputs=gr.Audio(label="Generated audio", type="filepath"),
         title="Trendyol TTS - Mac Apple Silicon",
-        description="Runs Trendyol/Trendyol-TTS on Apple Silicon using the VoxCPM MPS backend. MLX is installed for incremental pure-MLX porting.",
+        description="Runs Trendyol/Trendyol-TTS on Apple Silicon. Use --backend mlx for the strict text-only native MLX runtime, or --backend mps/torch for upstream PyTorch fallback features.",
     )
     demo.launch(server_name=args.host, server_port=args.port)
     return 0

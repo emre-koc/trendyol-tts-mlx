@@ -133,6 +133,8 @@ def export(model_id: str, out_dir: Path, local_files_only: bool = False) -> dict
         "latent_dim": config.latent_dim,
         "decoder_dim": config.decoder_dim,
         "decoder_rates": config.decoder_rates,
+        "sr_bin_boundaries": config.sr_bin_boundaries,
+        "cond_type": config.cond_type,
         "decode_chunk_size": int(torch.prod(torch.tensor(config.decoder_rates)).item()),
         "num_exported_tensors": len(tensors),
         "num_conv_layers": len(layers),

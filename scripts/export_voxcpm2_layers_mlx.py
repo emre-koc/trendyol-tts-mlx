@@ -27,6 +27,13 @@ BASE_LINEAR_PREFIXES = [
     "stop_proj",
     "stop_head",
     "feat_encoder.in_proj",
+    "feat_decoder.estimator.in_proj",
+    "feat_decoder.estimator.cond_proj",
+    "feat_decoder.estimator.out_proj",
+    "feat_decoder.estimator.time_mlp.linear_1",
+    "feat_decoder.estimator.time_mlp.linear_2",
+    "feat_decoder.estimator.delta_time_mlp.linear_1",
+    "feat_decoder.estimator.delta_time_mlp.linear_2",
 ]
 
 LAYER_LINEAR_SUFFIXES = [
@@ -40,8 +47,12 @@ LAYER_LINEAR_SUFFIXES = [
 ]
 
 BASE_PARAMETER_KEYS = [
+    "base_lm.embed_tokens.weight",
+    "base_lm.norm.weight",
+    "residual_lm.norm.weight",
     "feat_encoder.special_token",
     "feat_encoder.encoder.norm.weight",
+    "feat_decoder.estimator.decoder.norm.weight",
 ]
 
 LAYER_PARAMETER_SUFFIXES = [
@@ -63,16 +74,55 @@ def export(model_id: str, out_dir: Path, local_files_only: bool = False) -> dict
     linear_layers: list[dict[str, Any]] = []
     parameters: list[dict[str, Any]] = []
     encoder_layer_count = int(cfg["encoder_config"]["num_layers"])
-    linear_prefixes = BASE_LINEAR_PREFIXES + [
-        f"feat_encoder.encoder.layers.{layer_idx}.{suffix}"
-        for layer_idx in range(encoder_layer_count)
-        for suffix in LAYER_LINEAR_SUFFIXES
-    ]
-    parameter_keys = BASE_PARAMETER_KEYS + [
-        f"feat_encoder.encoder.layers.{layer_idx}.{suffix}"
-        for layer_idx in range(encoder_layer_count)
-        for suffix in LAYER_PARAMETER_SUFFIXES
-    ]
+    dit_layer_count = int(cfg["dit_config"]["num_layers"])
+    lm_export_layer_count = int(cfg["lm_config"]["num_hidden_layers"])
+    residual_lm_export_layer_count = int(cfg["residual_lm_num_layers"])
+    linear_prefixes = (
+        BASE_LINEAR_PREFIXES
+        + [
+            f"base_lm.layers.{layer_idx}.{suffix}"
+            for layer_idx in range(lm_export_layer_count)
+            for suffix in LAYER_LINEAR_SUFFIXES
+        ]
+        + [
+            f"residual_lm.layers.{layer_idx}.{suffix}"
+            for layer_idx in range(residual_lm_export_layer_count)
+            for suffix in LAYER_LINEAR_SUFFIXES
+        ]
+        + [
+            f"feat_encoder.encoder.layers.{layer_idx}.{suffix}"
+            for layer_idx in range(encoder_layer_count)
+            for suffix in LAYER_LINEAR_SUFFIXES
+        ]
+        + [
+            f"feat_decoder.estimator.decoder.layers.{layer_idx}.{suffix}"
+            for layer_idx in range(dit_layer_count)
+            for suffix in LAYER_LINEAR_SUFFIXES
+        ]
+    )
+    parameter_keys = (
+        BASE_PARAMETER_KEYS
+        + [
+            f"base_lm.layers.{layer_idx}.{suffix}"
+            for layer_idx in range(lm_export_layer_count)
+            for suffix in LAYER_PARAMETER_SUFFIXES
+        ]
+        + [
+            f"residual_lm.layers.{layer_idx}.{suffix}"
+            for layer_idx in range(residual_lm_export_layer_count)
+            for suffix in LAYER_PARAMETER_SUFFIXES
+        ]
+        + [
+            f"feat_encoder.encoder.layers.{layer_idx}.{suffix}"
+            for layer_idx in range(encoder_layer_count)
+            for suffix in LAYER_PARAMETER_SUFFIXES
+        ]
+        + [
+            f"feat_decoder.estimator.decoder.layers.{layer_idx}.{suffix}"
+            for layer_idx in range(dit_layer_count)
+            for suffix in LAYER_PARAMETER_SUFFIXES
+        ]
+    )
     weights_path = model_dir / "model.safetensors"
     with safe_open(weights_path, framework="pt", device="cpu") as f:
         keys = set(f.keys())
@@ -120,7 +170,49 @@ def export(model_id: str, out_dir: Path, local_files_only: bool = False) -> dict
         "source_snapshot": str(model_dir),
         "weights": str(mlx_weights_path),
         "lm_hidden_size": cfg["lm_config"]["hidden_size"],
+        "lm_vocab_size": cfg["lm_config"]["vocab_size"],
+        "lm_scale_emb": cfg["lm_config"].get("scale_emb", 1.0),
+        "lm_use_mup": cfg["lm_config"].get("use_mup", False),
+        "lm_rms_norm_eps": cfg["lm_config"]["rms_norm_eps"],
+        "lm_num_attention_heads": cfg["lm_config"]["num_attention_heads"],
+        "lm_num_key_value_heads": cfg["lm_config"]["num_key_value_heads"],
+        "lm_kv_channels": cfg["lm_config"].get("kv_channels"),
+        "lm_max_position_embeddings": cfg["lm_config"]["max_position_embeddings"],
+        "lm_rope_theta": cfg["lm_config"]["rope_theta"],
+        "lm_rope_scaling": cfg["lm_config"]["rope_scaling"],
+        "lm_scale_depth": cfg["lm_config"]["scale_depth"],
+        "lm_num_hidden_layers": cfg["lm_config"]["num_hidden_layers"],
+        "lm_no_rope": cfg["lm_config"].get("no_rope", False),
+        "lm_exported_layer_count": lm_export_layer_count,
+        "residual_lm_hidden_size": cfg["lm_config"]["hidden_size"],
+        "residual_lm_num_attention_heads": cfg["lm_config"]["num_attention_heads"],
+        "residual_lm_num_key_value_heads": cfg["lm_config"]["num_key_value_heads"],
+        "residual_lm_kv_channels": cfg["lm_config"].get("kv_channels"),
+        "residual_lm_rms_norm_eps": cfg["lm_config"]["rms_norm_eps"],
+        "residual_lm_scale_depth": cfg["lm_config"]["scale_depth"],
+        "residual_lm_num_hidden_layers": cfg["residual_lm_num_layers"],
+        "residual_lm_no_rope": cfg["residual_lm_no_rope"],
+        "residual_lm_use_mup": cfg["lm_config"].get("use_mup", False),
+        "residual_lm_exported_layer_count": residual_lm_export_layer_count,
         "dit_hidden_size": cfg["dit_config"]["hidden_dim"],
+        "dit_num_attention_heads": cfg["dit_config"]["num_heads"],
+        "dit_num_key_value_heads": cfg["lm_config"]["num_key_value_heads"],
+        "dit_kv_channels": cfg["dit_config"].get("kv_channels"),
+        "dit_max_position_embeddings": cfg["lm_config"]["max_position_embeddings"],
+        "dit_rope_theta": cfg["lm_config"]["rope_theta"],
+        "dit_rope_scaling": cfg["lm_config"]["rope_scaling"],
+        "dit_rms_norm_eps": cfg["lm_config"]["rms_norm_eps"],
+        "dit_scale_depth": cfg["lm_config"]["scale_depth"],
+        "dit_num_hidden_layers": cfg["dit_config"]["num_layers"],
+        "dit_use_mup": False,
+        "dit_in_channels": cfg["audio_vae_config"]["latent_dim"],
+        "dit_patch_size": cfg["patch_size"],
+        "dit_sigma_min": cfg["dit_config"]["cfm_config"].get("sigma_min", 1e-6),
+        "dit_solver": cfg["dit_config"]["cfm_config"].get("solver", "euler"),
+        "dit_inference_cfg_rate": cfg["dit_config"]["cfm_config"].get("inference_cfg_rate", 2.0),
+        "dit_t_scheduler": cfg["dit_config"]["cfm_config"].get("t_scheduler", "log-norm"),
+        "dit_mean_mode": cfg["dit_config"].get("mean_mode", False),
+        "dit_exported_layer_count": dit_layer_count,
         "encoder_hidden_size": cfg["encoder_config"]["hidden_dim"],
         "encoder_num_attention_heads": cfg["encoder_config"]["num_heads"],
         "encoder_num_key_value_heads": cfg["lm_config"]["num_key_value_heads"],

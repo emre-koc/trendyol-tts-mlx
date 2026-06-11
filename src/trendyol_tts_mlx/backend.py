@@ -7,6 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .mlx_backend import TrendyolMLXModel
+
 DEFAULT_MODEL_ID = "Trendyol/Trendyol-TTS"
 
 
@@ -14,6 +16,7 @@ DEFAULT_MODEL_ID = "Trendyol/Trendyol-TTS"
 class SynthesisConfig:
     model_id: str = DEFAULT_MODEL_ID
     device: str = "mps"
+    backend: str = "mps"
     optimize: bool = False
     seed: int = 42
     cfg_value: float = 2.0
@@ -23,14 +26,14 @@ class SynthesisConfig:
     denoise: bool = False
     cache_dir: str | None = None
     local_files_only: bool = False
+    mlx_artifact_dir: str | None = None
 
 
 class TrendyolTTS:
-    """Apple Silicon runner for Trendyol/Trendyol-TTS.
+    """Native Apple Silicon runner for Trendyol/Trendyol-TTS.
 
-    The public project is MLX-ready, but the production backend here delegates to
-    upstream VoxCPM on PyTorch MPS. A pure MLX VoxCPM2 implementation can replace
-    this class later without changing the CLI/app surface.
+    `backend="mlx"` installs a native MLX VoxCPM2 generation loop plus MLX
+    AudioVAE decode. `backend="mps"`/`"torch"` keeps the upstream PyTorch path.
     """
 
     def __init__(self, config: SynthesisConfig):
@@ -39,17 +42,36 @@ class TrendyolTTS:
         self.sample_rate = 48000
 
     def load(self) -> "TrendyolTTS":
+        if self.config.seed is not None:
+            random.seed(self.config.seed)
+            np.random.seed(self.config.seed)
+            if self.config.backend == "mlx":
+                import mlx.core as mx
+
+                mx.random.seed(self.config.seed)
+
+        if self.config.backend == "mlx":
+            self._model = TrendyolMLXModel.from_pretrained(
+                self.config.model_id,
+                cache_dir=self.config.cache_dir,
+                local_files_only=self.config.local_files_only,
+                artifact_dir=self.config.mlx_artifact_dir,
+            )
+            self.sample_rate = int(getattr(self._model, "sample_rate", 48000))
+            return self
+
         # Import lazily so `trendyol-tts-check` can show actionable dependency failures.
         import torch
         from voxcpm.core import VoxCPM
 
         if self.config.seed is not None:
-            random.seed(self.config.seed)
-            np.random.seed(self.config.seed)
             torch.manual_seed(self.config.seed)
 
         if self.config.device == "mps" and not torch.backends.mps.is_available():
             raise RuntimeError("Requested --device mps, but torch MPS is not available on this machine")
+
+        if self.config.backend not in {"mps", "torch"}:
+            raise ValueError(f"Unsupported backend {self.config.backend!r}; expected 'mlx', 'mps', or 'torch'")
 
         # VoxCPM 2.0.3 auto-adjusts bfloat16 -> float32 on MPS for stability.
         self._model = VoxCPM.from_pretrained(
@@ -94,6 +116,7 @@ def config_from_env(**overrides) -> SynthesisConfig:
     values = dict(
         model_id=os.getenv("MODEL_ID", DEFAULT_MODEL_ID),
         device=os.getenv("DEVICE", "mps"),
+        backend=os.getenv("BACKEND", "mps"),
         optimize=env_bool("OPTIMIZE_MODEL", False),
         seed=int(os.getenv("INFERENCE_SEED", "42")),
         cfg_value=float(os.getenv("CFG_VALUE", "2.0")),
@@ -103,6 +126,7 @@ def config_from_env(**overrides) -> SynthesisConfig:
         denoise=env_bool("DENOISE", False),
         cache_dir=os.getenv("HF_HOME") or None,
         local_files_only=env_bool("LOCAL_FILES_ONLY", False),
+        mlx_artifact_dir=os.getenv("MLX_ARTIFACT_DIR") or None,
     )
     values.update({k: v for k, v in overrides.items() if v is not None})
     return SynthesisConfig(**values)
