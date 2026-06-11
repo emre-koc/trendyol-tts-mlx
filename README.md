@@ -30,6 +30,14 @@ chmod 600 .huggingface_token
 export HF_TOKEN="$(cat .huggingface_token)"
 ```
 
+Download the exported MLX weights from Hugging Face into the expected local artifact directory:
+
+```bash
+hf download emrekoc/trendyol-tts-mlx --local-dir models/Trendyol-TTS-mlx
+```
+
+The MLX weight repo is https://huggingface.co/emrekoc/trendyol-tts-mlx.
+
 Check the environment:
 
 ```bash
