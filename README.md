@@ -15,7 +15,7 @@ Important status:
 Use Python 3.11 on this Mac:
 
 ```bash
-cd /Users/fobem/trendyol-tts-mlx
+cd ~/trendyol-tts-mlx
 /opt/homebrew/bin/python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
@@ -91,7 +91,7 @@ docker run -it -p 7860:7860 --platform=linux/amd64 --gpus all \
 Mac native equivalent:
 
 ```bash
-cd /Users/fobem/trendyol-tts-mlx
+cd ~/trendyol-tts-mlx
 source .venv/bin/activate
 MODEL_ID="Trendyol/Trendyol-TTS" \
 INFERENCE_SEED="42" \
@@ -108,7 +108,7 @@ Do **not** set `REQUIRE_CUDA=1` on Mac.
 The first pure-MLX artifact is implemented: AudioVAE decoder weight export, plus an MLX implementation of the full decoder/vocoder graph from latent audio tokens to waveform.
 
 ```bash
-cd /Users/fobem/trendyol-tts-mlx
+cd ~/trendyol-tts-mlx
 source .venv/bin/activate
 python scripts/export_audiovae_mlx.py --local-files-only
 python scripts/check_mlx_first_conv_parity.py
@@ -177,7 +177,7 @@ The strict MLX runtime is text-only by design for now:
 Run backend benchmarks in separate processes to avoid one backend's allocated memory affecting the next backend:
 
 ```bash
-cd /Users/fobem/trendyol-tts-mlx
+cd ~/trendyol-tts-mlx
 source .venv/bin/activate
 
 python scripts/benchmark_backends.py \
