@@ -1,5 +1,7 @@
 # Trendyol TTS on Mac M1 / Apple Silicon
 
+![Trendyol TTS: Turkish text to speech with native MLX on Apple Silicon](assets/hero.png)
+
 This is a dedicated macOS project for running [`Trendyol/Trendyol-TTS`](https://huggingface.co/Trendyol/Trendyol-TTS) locally on Apple Silicon.
 
 Important status:
